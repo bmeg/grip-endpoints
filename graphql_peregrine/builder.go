@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"unicode"
 
+	"reflect"
+
 	"github.com/bmeg/grip/gripql"
 	"github.com/bmeg/grip/log"
 	"github.com/graphql-go/graphql"
@@ -15,7 +17,6 @@ const ARG_OFFSET = "offset"
 const ARG_ID = "id"
 const ARG_IDS = "ids"
 const ARG_FILTER = "filter"
-const ARG_NAME = "name"
 const ARG_ACCESS = "accessibility"
 const ARG_SORT = "sort"
 const ARG_PROJECT_ID = "project_id"
@@ -83,6 +84,7 @@ func buildGraphQLSchema(schema *gripql.Graph, client gripql.Client, graph string
 }
 
 func buildField(x string) (*graphql.Field, error) {
+
 	var o *graphql.Field
 	switch x {
 	case "NUMERIC":
@@ -91,6 +93,9 @@ func buildField(x string) (*graphql.Field, error) {
 		o = &graphql.Field{Type: graphql.String}
 	case "BOOL":
 		o = &graphql.Field{Type: graphql.Boolean}
+	// implement strlist type to satisfy query requirements
+	case "STRLIST":
+		o = &graphql.Field{Type: graphql.NewList(graphql.String)}
 	default:
 		return nil, fmt.Errorf("%s does not map to a GQL type", x)
 	}
@@ -109,6 +114,7 @@ func buildSliceField(name string, s []interface{}) (*graphql.Field, error) {
 			f, err = buildSliceField(name, x)
 
 		} else if x, ok := val.(string); ok {
+			fmt.Println("VAL: ", val)
 			f, err = buildField(x)
 		} else {
 			err = fmt.Errorf("unhandled type: %T %v", val, val)
@@ -161,6 +167,7 @@ func buildObject(name string, obj map[string]interface{}) (*graphql.Object, erro
 			}
 			// handle string
 		} else if x, ok := val.(string); ok {
+			fmt.Println("VALUE HERE: ", val)
 			if f, err := buildField(x); err == nil {
 				objFields[key] = f
 			} else {
@@ -288,19 +295,19 @@ func buildFieldConfigArgument(obj *graphql.Object) graphql.FieldConfigArgument {
 		ARG_LIMIT:  &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 100},
 		ARG_OFFSET: &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 0},
 		//ARG_FILTER:     &graphql.ArgumentConfig{Type: JSONScalar},
-		ARG_PROJECT_ID: &graphql.ArgumentConfig{Type: graphql.String},
-		ARG_NAME:       &graphql.ArgumentConfig{Type: graphql.String},
 		ARG_ACCESS:     &graphql.ArgumentConfig{Type: graphql.EnumValueType, DefaultValue: all},
 		ARG_SORT:       &graphql.ArgumentConfig{Type: JSONScalar},
+		ARG_PROJECT_ID: &graphql.ArgumentConfig{Type: graphql.NewList(graphql.String)},
 	}
 	if obj == nil {
 		return args
 	}
 	for k, v := range obj.Fields() {
 		switch v.Type {
-		case graphql.String, graphql.Int, graphql.Float, graphql.Boolean:
+		case graphql.String, graphql.Int, graphql.Float, graphql.Boolean, graphql.NewList(graphql.String):
 			args[k] = &graphql.ArgumentConfig{Type: v.Type}
 		default:
+			fmt.Println("HIT DEFAULT WITH: ", v, v.Type)
 			continue
 		}
 	}
@@ -390,7 +397,6 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 	queryFields := graphql.Fields{}
 	// For each of the objects that have been listed in the objectMap build a query entry point
 	for objName, obj := range objects.objects {
-		fmt.Println("OBJ NAME: ", obj)
 
 		label := obj.Name()
 		temp := []rune(label)
@@ -401,13 +407,12 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 			Type: graphql.NewList(obj),
 			Args: buildFieldConfigArgument(obj),
 			Resolve: func(params graphql.ResolveParams) (interface{}, error) {
-				//fmt.Println("NAMES BEFORE", reflect.TypeOf(params.Args[ARG_NAME]), params.Args[ARG_NAME].(string))
-				/*if names, ok := params.Args[ARG_NAME].(string); ok {
-					if len(names) > 0 {
-						params.Args[ARG_NAME] = names[0]
-					}
-				}*/
-				//fmt.Println("NAMES AFTER", reflect.TypeOf(params.Args[ARG_NAME]), params.Args[ARG_NAME].(string))
+				// id Project id filter is not specified then project_id field should be a string
+				// and not a list of strings to avoid schema validation errors
+				if _, ok := params.Args[ARG_PROJECT_ID]; !ok {
+					obj.Fields()["project_id"].Type = graphql.String
+				}
+				//fmt.Println("OBJ1: ", obj.Fields()["project_id"].Type)
 
 				q := gripql.V().HasLabel(label)
 				if id, ok := params.Args[ARG_ID].(string); ok {
@@ -419,26 +424,30 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 					q = gripql.V(ids...).HasLabel(label)
 				}
 				var filter *FilterBuilder
-				//fmt.Println("FITLER::::::::::::::: ", params.Args[ARG_NAME].([]string)[0])
-				//params.Args[ARG_NAME] = params.Args[ARG_NAME].([]string)[0]
-				//if filterArg, ok := params.Args[ARG_NAME].(string); ok {
-				//	fmt.Printf("Filter: %#v\n", filterArg)
-				//filter = NewFilterBuilder(filterArg)
-				//}
+				if filterArg, ok := params.Args[ARG_FILTER].(map[string]any); ok {
+					fmt.Printf("Filter: %#v\n", filterArg)
+					filter = NewFilterBuilder(filterArg)
+				}
+
 				for key, val := range params.Args {
-					fmt.Println("KEY: ", key, "VAL: ", val)
+					fmt.Println("KEY: ", key, "VAL: ", val, reflect.TypeOf(val))
+					// check for absence of default argument [String] caused by providing no $name filter
+					if key == "project_id" && reflect.TypeOf(val) != reflect.TypeOf(graphql.NewList(graphql.String)) {
+						val = val.([]any)[0]
+					}
+
 					switch key {
 					case ARG_ID, ARG_IDS, ARG_LIMIT, ARG_OFFSET, ARG_ACCESS, ARG_SORT:
 					default:
-						q = q.Has(gripql.Eq(key, val))
+						if key == "project_id" && reflect.TypeOf(val) != reflect.TypeOf(graphql.NewList(graphql.String)) {
+							q = q.Has(gripql.Eq(key, val))
+						}
 
 					}
 				}
-				fmt.Println("QUERY: ", q)
 
 				if filter != nil {
 					var err error
-					// extend grip calls the filter functions to add filters
 					q, err = filter.ExtendGrip(q, "")
 					if err != nil {
 						return nil, err
@@ -496,15 +505,16 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 					}
 					out = append(out, data["f0"])
 				}
-				//fmt.Println("OUT: ", out)
+				fmt.Println("QUERY END: ", q)
 				return out, nil
 			},
 		}
 		queryFields[objName] = f
 	}
 
+	fmt.Println("PROJECT OBJECT: ", objects.objects["project"])
+
 	//queryFields["project"] = buildAggregationField(client, graph, objects)
-	queryFields["_mapping"] = buildMappingField(client, graph, objects)
 
 	query := graphql.NewObject(
 		graphql.ObjectConfig{
