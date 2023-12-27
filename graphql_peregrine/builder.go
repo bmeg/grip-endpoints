@@ -167,7 +167,6 @@ func buildObject(name string, obj map[string]interface{}) (*graphql.Object, erro
 			}
 			// handle string
 		} else if x, ok := val.(string); ok {
-			fmt.Println("VALUE HERE: ", val)
 			if f, err := buildField(x); err == nil {
 				objFields[key] = f
 			} else {
@@ -402,17 +401,15 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 		temp := []rune(label)
 		temp[0] = unicode.ToUpper(temp[0])
 		label = string(temp)
+
 		f := &graphql.Field{
 			Name: objName,
 			Type: graphql.NewList(obj),
 			Args: buildFieldConfigArgument(obj),
 			Resolve: func(params graphql.ResolveParams) (interface{}, error) {
-				// id Project id filter is not specified then project_id field should be a string
-				// and not a list of strings to avoid schema validation errors
-				if _, ok := params.Args[ARG_PROJECT_ID]; !ok {
-					obj.Fields()["project_id"].Type = graphql.String
-				}
-				//fmt.Println("OBJ1: ", obj.Fields()["project_id"].Type)
+				// Schema hack to convert project_id typing to string whenever
+				// a query happens, but still accept lists because typed as a list
+				obj.Fields()["project_id"].Type = graphql.String
 
 				q := gripql.V().HasLabel(label)
 				if id, ok := params.Args[ARG_ID].(string); ok {
@@ -428,14 +425,12 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 					fmt.Printf("Filter: %#v\n", filterArg)
 					filter = NewFilterBuilder(filterArg)
 				}
-
 				for key, val := range params.Args {
 					fmt.Println("KEY: ", key, "VAL: ", val, reflect.TypeOf(val))
 					// check for absence of default argument [String] caused by providing no $name filter
 					if key == "project_id" && reflect.TypeOf(val) != reflect.TypeOf(graphql.NewList(graphql.String)) {
 						val = val.([]any)[0]
 					}
-
 					switch key {
 					case ARG_ID, ARG_IDS, ARG_LIMIT, ARG_OFFSET, ARG_ACCESS, ARG_SORT:
 					default:
@@ -512,9 +507,10 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 		queryFields[objName] = f
 	}
 
-	fmt.Println("PROJECT OBJECT: ", objects.objects["project"])
-
-	//queryFields["project"] = buildAggregationField(client, graph, objects)
+	queryFields["_observation_count"] = _total_counts(client, graph, "observation")
+	queryFields["_research_subject_count"] = _total_counts(client, graph, "research_subject")
+	queryFields["_specimen_count"] = _total_counts(client, graph, "specimen")
+	queryFields["_document_reference_count"] = _total_counts(client, graph, "document_reference")
 
 	query := graphql.NewObject(
 		graphql.ObjectConfig{
@@ -522,6 +518,46 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 			Fields: queryFields,
 		},
 	)
-	//fmt.Printf("Query fields: %#v\n", queryFields)
 	return query
+}
+
+// generalized function for getting total counts numbers filtered by project
+func _total_counts(client gripql.Client, graph string, node_type string) *graphql.Field {
+	temp := []rune(node_type)
+	temp[0] = unicode.ToUpper(temp[0])
+	label := string(temp)
+
+	return &graphql.Field{
+		Name: "_" + node_type + "_count",
+		Type: graphql.Int,
+		Args: graphql.FieldConfigArgument{
+			ARG_PROJECT_ID: &graphql.ArgumentConfig{Type: graphql.NewList(graphql.String)},
+		},
+		Resolve: func(p graphql.ResolveParams) (any, error) {
+			q := gripql.V().HasLabel(label)
+			if val, ok := p.Args[ARG_PROJECT_ID].(string); ok {
+				fmt.Println("VAL: ", val)
+				q = q.Has(gripql.Eq(ARG_PROJECT_ID, val))
+			}
+			fmt.Println("QUERY: ", q)
+			aggs := []*gripql.Aggregate{
+				{Name: "_" + node_type + "_count", Aggregation: &gripql.Aggregate_Count{}},
+			}
+			out := map[string]any{}
+			q = q.Aggregate(aggs)
+			result, err := client.Traversal(&gripql.GraphQuery{Graph: graph, Query: q.Statements})
+			if err != nil {
+				return nil, err
+			}
+			if len(result) == 0 {
+				out["_"+node_type+"_count"] = 0
+			} else {
+				for i := range result {
+					agg := i.GetAggregations()
+					out["_"+node_type+"_count"] = int(agg.Value)
+				}
+			}
+			return out["_"+node_type+"_count"], nil
+		},
+	}
 }
