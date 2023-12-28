@@ -1,4 +1,0 @@
-[submodule "grip"]
-	path = grip
-	url = https://github.com/bmeg/grip
-	branch = feature/gen3-endpoint
