@@ -319,37 +319,6 @@ func lower_first_char(name string) string {
 	return string(temp)
 }
 
-func buildMappingField(client gripql.Client, graph string, objects *objectMap) *graphql.Field {
-	mappingFields := graphql.Fields{}
-	for objName, obj := range objects.objects {
-		fieldNames := []string{}
-		for fieldName := range obj.Fields() {
-			fieldNames = append(fieldNames, fieldName)
-		}
-		mappingFields[objName] = &graphql.Field{
-			Name: objName,
-			Type: graphql.NewList(graphql.String),
-			Resolve: func(params graphql.ResolveParams) (interface{}, error) {
-				return fieldNames, nil
-			},
-		}
-	}
-
-	mappingObjectType := graphql.NewObject(graphql.ObjectConfig{
-		Name:   "_mapping",
-		Fields: mappingFields,
-	})
-
-	return &graphql.Field{
-		Name: "_mapping",
-		Type: mappingObjectType,
-		Resolve: func(params graphql.ResolveParams) (interface{}, error) {
-			// Return an empty map just to fulfill the GraphQL response structure
-			return map[string]interface{}{}, nil
-		},
-	}
-}
-
 type renderTree struct {
 	fields    []string
 	parent    map[string]string
@@ -389,6 +358,26 @@ func (om *objectMap) traversalBuild(query *gripql.Query, vertLabel string, field
 	return query
 }
 
+func apply_basic_filters(p graphql.ResolveParams, q *gripql.Query) *gripql.Query {
+	if proj_arg, ok := p.Args[ARG_PROJECT_ID]; ok {
+		if val, ok := proj_arg.(string); ok {
+			q = q.Has(gripql.Eq(ARG_PROJECT_ID, val))
+		} else if filter_list, ok := proj_arg.([]any); ok {
+			list_len := len(filter_list)
+			if list_len == 1 {
+				q = q.Has(gripql.Eq(ARG_PROJECT_ID, filter_list[0].(string)))
+			} else if list_len > 1 {
+				final_expr := gripql.Or(gripql.Eq(ARG_PROJECT_ID, filter_list[0].(string)), gripql.Eq(ARG_PROJECT_ID, filter_list[1].(string)))
+				for i := 2; i < len(filter_list); i++ {
+					final_expr = gripql.Or(final_expr, gripql.Eq(ARG_PROJECT_ID, filter_list[i].(string)))
+				}
+				q = q.Has(final_expr)
+			}
+		}
+	}
+	return q
+}
+
 // buildQueryObject scans the built objects, which were derived from the list of vertex types
 // found in the schema. It then build a query object that will take search parameters
 // and create lists of objects of that type
@@ -407,6 +396,7 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 			Type: graphql.NewList(obj),
 			Args: buildFieldConfigArgument(obj),
 			Resolve: func(params graphql.ResolveParams) (interface{}, error) {
+
 				// Schema hack to convert project_id typing to string whenever
 				// a query happens, but still accept lists because typed as a list
 				obj.Fields()["project_id"].Type = graphql.String
@@ -420,35 +410,18 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 					fmt.Printf("Doing %s ids=%s queries", label, ids)
 					q = gripql.V(ids...).HasLabel(label)
 				}
-				var filter *FilterBuilder
-				if filterArg, ok := params.Args[ARG_FILTER].(map[string]any); ok {
-					fmt.Printf("Filter: %#v\n", filterArg)
-					filter = NewFilterBuilder(filterArg)
-				}
+
 				for key, val := range params.Args {
 					fmt.Println("KEY: ", key, "VAL: ", val, reflect.TypeOf(val))
 					// check for absence of default argument [String] caused by providing no $name filter
-					if key == "project_id" && reflect.TypeOf(val) != reflect.TypeOf(graphql.NewList(graphql.String)) {
-						val = val.([]any)[0]
-					}
 					switch key {
 					case ARG_ID, ARG_IDS, ARG_LIMIT, ARG_OFFSET, ARG_ACCESS, ARG_SORT:
 					default:
-						if key == "project_id" && reflect.TypeOf(val) != reflect.TypeOf(graphql.NewList(graphql.String)) {
-							q = q.Has(gripql.Eq(key, val))
-						}
+						q = apply_basic_filters(params, q)
 
 					}
 				}
-
-				if filter != nil {
-					var err error
-					q, err = filter.ExtendGrip(q, "")
-					if err != nil {
-						return nil, err
-					}
-				}
-
+				fmt.Println("VALUE OF Q AFTER FILTER: ", q)
 				q = q.As("f0")
 				limit := params.Args[ARG_LIMIT].(int)
 				offset := params.Args[ARG_OFFSET].(int)
@@ -459,8 +432,6 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 					parent:    map[string]string{},
 					fieldName: map[string]string{},
 				}
-				//fmt.Println("Q1: ", q)
-
 				for _, f := range params.Info.FieldASTs {
 					q = objects.traversalBuild(q, label, f, "f0", rt, limit, offset)
 				}
@@ -536,16 +507,8 @@ func _total_counts(client gripql.Client, graph string, node_type string) *graphq
 		Resolve: func(p graphql.ResolveParams) (any, error) {
 			q := gripql.V().HasLabel(label)
 			fmt.Println("PARGS: ", p.Args)
-			if proj_arg, ok := p.Args[ARG_PROJECT_ID]; ok {
-				if val, ok := proj_arg.(string); ok {
-					fmt.Println("VAL IN .(string): ", val)
-					q = q.Has(gripql.Eq(ARG_PROJECT_ID, val))
-				} else if val, ok := proj_arg.([]any)[0].(string); ok {
-					fmt.Println("VAL IN ([]any)[0].(string): ", val)
-					q = q.Has(gripql.Eq(ARG_PROJECT_ID, val))
-				}
-			}
-			fmt.Println("QUERY: ", q)
+			q = apply_basic_filters(p, q)
+			fmt.Println(" _total_counts QUERY: ", q)
 			aggs := []*gripql.Aggregate{
 				{Name: "_" + node_type + "_count", Aggregation: &gripql.Aggregate_Count{}},
 			}
