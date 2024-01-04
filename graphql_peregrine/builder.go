@@ -535,9 +535,15 @@ func _total_counts(client gripql.Client, graph string, node_type string) *graphq
 		},
 		Resolve: func(p graphql.ResolveParams) (any, error) {
 			q := gripql.V().HasLabel(label)
-			if val, ok := p.Args[ARG_PROJECT_ID].(string); ok {
-				fmt.Println("VAL: ", val)
-				q = q.Has(gripql.Eq(ARG_PROJECT_ID, val))
+			fmt.Println("PARGS: ", p.Args)
+			if proj_arg, ok := p.Args[ARG_PROJECT_ID]; ok {
+				if val, ok := proj_arg.(string); ok {
+					fmt.Println("VAL IN .(string): ", val)
+					q = q.Has(gripql.Eq(ARG_PROJECT_ID, val))
+				} else if val, ok := proj_arg.([]any)[0].(string); ok {
+					fmt.Println("VAL IN ([]any)[0].(string): ", val)
+					q = q.Has(gripql.Eq(ARG_PROJECT_ID, val))
+				}
 			}
 			fmt.Println("QUERY: ", q)
 			aggs := []*gripql.Aggregate{
