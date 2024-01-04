@@ -19,7 +19,7 @@ RUN cd /go/src/github.com/bmeg/grip/grip && go build -trimpath --buildmode=plugi
 RUN cp /go/src/github.com/bmeg/grip/grip/graphql_gen3.so /
 RUN cp /go/src/github.com/bmeg/grip/grip/gen3_writer.so /
 RUN cp /go/src/github.com/bmeg/grip/grip/graphql_peregrine.so /
-RUN cp /go/src/github.com/bmeg/grip/grip/graphql_peregrine/mongo.yml /
+RUN cp /go/src/github.com/bmeg/grip/mongo.yml /
 RUN cp /go/src/github.com/bmeg/grip/schema.json /
 
 
