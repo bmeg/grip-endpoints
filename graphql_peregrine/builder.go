@@ -363,16 +363,7 @@ func apply_basic_filters(p graphql.ResolveParams, q *gripql.Query) *gripql.Query
 		if val, ok := proj_arg.(string); ok {
 			q = q.Has(gripql.Eq(ARG_PROJECT_ID, val))
 		} else if filter_list, ok := proj_arg.([]any); ok {
-			list_len := len(filter_list)
-			if list_len == 1 {
-				q = q.Has(gripql.Eq(ARG_PROJECT_ID, filter_list[0].(string)))
-			} else if list_len > 1 {
-				final_expr := gripql.Or(gripql.Eq(ARG_PROJECT_ID, filter_list[0].(string)), gripql.Eq(ARG_PROJECT_ID, filter_list[1].(string)))
-				for i := 2; i < len(filter_list); i++ {
-					final_expr = gripql.Or(final_expr, gripql.Eq(ARG_PROJECT_ID, filter_list[i].(string)))
-				}
-				q = q.Has(final_expr)
-			}
+			q = q.Has(gripql.Within(ARG_PROJECT_ID, filter_list...))
 		}
 	}
 	return q
@@ -442,11 +433,11 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 					render[i+"_data"] = "$" + i + "._data"
 				}
 				q = q.Render(render)
+
 				result, err := client.Traversal(&gripql.GraphQuery{Graph: graph, Query: q.Statements})
 				if err != nil {
 					return nil, err
 				}
-
 				out := []any{}
 				for r := range result {
 					values := r.GetRender().GetStructValue().AsMap()
@@ -471,7 +462,7 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 					}
 					out = append(out, data["f0"])
 				}
-				fmt.Println("QUERY END: ", q)
+				fmt.Println("OUT: ", out)
 				return out, nil
 			},
 		}
