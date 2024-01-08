@@ -3,8 +3,12 @@ package main
 import (
 	"fmt"
 	"unicode"
-
+	"net/http"
+	"sync"
+	"io"
+	"encoding/json"
 	"reflect"
+	"errors"
 
 	"github.com/bmeg/grip/gripql"
 	"github.com/bmeg/grip/log"
@@ -29,6 +33,8 @@ const (
 	accessible   Accessibility = "accessible"
 	unaccessible Accessibility = "unaccessible"
 )
+
+var cache = sync.Map{}
 
 var JSONScalar = graphql.NewScalar(graphql.ScalarConfig{
 	Name: "JSON",
@@ -56,7 +62,7 @@ var JSONScalar = graphql.NewScalar(graphql.ScalarConfig{
 // buildGraphQLSchema reads a GRIP graph schema (which is stored as a graph) and creates
 // a GraphQL-GO based schema. The GraphQL-GO schema all wraps the request functions that use
 // the gripql.Client to find the requested data
-func buildGraphQLSchema(schema *gripql.Graph, client gripql.Client, graph string) (*graphql.Schema, error) {
+func buildGraphQLSchema(schema *gripql.Graph, client gripql.Client, graph string, headers http.Header) (*graphql.Schema, error) {
 	if schema == nil {
 		return nil, fmt.Errorf("graphql.NewSchema error: nil gripql.Graph for graph: %s", graph)
 	}
@@ -69,7 +75,8 @@ func buildGraphQLSchema(schema *gripql.Graph, client gripql.Client, graph string
 
 	// Build the set of objects that exist in the query structuer
 	fmt.Println("OBJECT MAP: ", objectMap)
-	queryObj := buildQueryObject(client, graph, objectMap)
+	fmt.Println("REQUEST HEADERS: ", headers)
+	queryObj := buildQueryObject(client, graph, objectMap, headers)
 	schemaConfig := graphql.SchemaConfig{
 		Query: queryObj,
 	}
@@ -369,10 +376,59 @@ func apply_basic_filters(p graphql.ResolveParams, q *gripql.Query) *gripql.Query
 	return q
 }
 
+
+func fetchAndCacheData(url string, token string) (any, error) {
+    if cachedData, ok := cache.Load(url); ok {
+        return cachedData, nil
+    }
+
+    GetRequest, err := http.NewRequest("GET", url, nil)
+    if err != nil{
+	log.Error(err)
+	return nil, err
+    }
+
+    GetRequest.Header.Set("Authorization", token)
+    GetRequest.Header.Set("Accept", "application/json")
+    fetchedData, err := http.DefaultClient.Do(GetRequest)
+    if err != nil {
+        log.Error(err)
+        return nil, err
+    }
+    defer fetchedData.Body.Close()
+
+    if fetchedData.StatusCode == http.StatusOK {
+    	bodyBytes, err := io.ReadAll(fetchedData.Body)
+     	if err != nil {
+            log.Error(err)
+        }
+
+	var parsedData any
+	err = json.Unmarshal(bodyBytes, &parsedData)
+	if err != nil {
+	    log.Error(err)
+    	    return nil, err
+	}
+	cache.Store(url, parsedData)
+	return parsedData, nil
+
+    }
+
+    err = errors.New("Arborist auth/mapping GET returned a non-200 status code: " + fetchedData.Status)
+    return nil, err
+}
+
+func parseArboristPerms(Mappings any) (){
+
+
+
+}
+
+
 // buildQueryObject scans the built objects, which were derived from the list of vertex types
 // found in the schema. It then build a query object that will take search parameters
 // and create lists of objects of that type
-func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *graphql.Object {
+func buildQueryObject(client gripql.Client, graph string, objects *objectMap, header http.Header) *graphql.Object {
 	queryFields := graphql.Fields{}
 	// For each of the objects that have been listed in the objectMap build a query entry point
 	for objName, obj := range objects.objects {
@@ -388,6 +444,9 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 			Args: buildFieldConfigArgument(obj),
 			Resolve: func(params graphql.ResolveParams) (interface{}, error) {
 
+				token := header["Authorization"][0]
+				data, err := fetchAndCacheData("http://arborist-service/auth/mapping", token)
+				fmt.Println("CACHE: ", data)
 				// Schema hack to convert project_id typing to string whenever
 				// a query happens, but still accept lists because typed as a list
 				obj.Fields()["project_id"].Type = graphql.String

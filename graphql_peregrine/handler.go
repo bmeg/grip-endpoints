@@ -66,7 +66,7 @@ func (gh *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) 
 	var ok bool
 	if handler, ok = gh.handlers[graphName]; ok {
 		//Call the setup function. If nothing has changed it will return without doing anything
-		err := handler.setup()
+		err := handler.setup(request.Header)
 		if err != nil {
 			http.Error(writer, fmt.Sprintf("No GraphQL handler found for graph: %s", graphName), http.StatusInternalServerError)
 			return
@@ -74,7 +74,7 @@ func (gh *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) 
 	} else {
 		//Graph handler was not found, so we'll need to set it up
 		var err error
-		handler, err = newGraphHandler(graphName, gh.client)
+		handler, err = newGraphHandler(graphName, gh.client, request.Header)
 		if err != nil {
 			http.Error(writer, fmt.Sprintf("No GraphQL handler found for graph: %s", graphName), http.StatusInternalServerError)
 			return
@@ -89,12 +89,12 @@ func (gh *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) 
 }
 
 // newGraphHandler creates a new graphql handler from schema
-func newGraphHandler(graph string, client gripql.Client) (*graphHandler, error) {
+func newGraphHandler(graph string, client gripql.Client, headers http.Header) (*graphHandler, error) {
 	o := &graphHandler{
 		graph:  graph,
 		client: client,
 	}
-	err := o.setup()
+	err := o.setup(headers)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func newGraphHandler(graph string, client gripql.Client) (*graphHandler, error) 
 
 // check timestamp to see if schema needs to be updated, and if so
 // rebuild graphql schema
-func (gh *graphHandler) setup() error {
+func (gh *graphHandler) setup(headers http.Header) error {
 	ts, _ := gh.client.GetTimestamp(gh.graph)
 	if ts == nil || ts.Timestamp != gh.timestamp {
 		log.WithFields(log.Fields{"graph": gh.graph}).Info("Reloading GraphQL schema")
@@ -112,7 +112,7 @@ func (gh *graphHandler) setup() error {
 			log.WithFields(log.Fields{"graph": gh.graph, "error": err}).Error("GetSchema error")
 			return err
 		}
-		gqlSchema, err := buildGraphQLSchema(schema, gh.client, gh.graph)
+		gqlSchema, err := buildGraphQLSchema(schema, gh.client, gh.graph, headers)
 		if err != nil {
 			log.WithFields(log.Fields{"graph": gh.graph, "error": err}).Error("GraphQL schema build failed")
 			gh.gqlHandler = nil
