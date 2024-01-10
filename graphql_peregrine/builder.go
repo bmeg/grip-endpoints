@@ -9,12 +9,14 @@ import (
 	"encoding/json"
 	"reflect"
 	"errors"
+	//"strings"
 
 	"github.com/bmeg/grip/gripql"
 	"github.com/bmeg/grip/log"
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/graphql/language/ast"
 )
+
 
 const ARG_LIMIT = "first"
 const ARG_OFFSET = "offset"
@@ -376,8 +378,7 @@ func apply_basic_filters(p graphql.ResolveParams, q *gripql.Query) *gripql.Query
 	return q
 }
 
-
-func fetchAndCacheData(url string, token string) (any, error) {
+func getAuthMappings(url string, token string) (any, error) {
     if cachedData, ok := cache.Load(url); ok {
         return cachedData, nil
     }
@@ -418,12 +419,121 @@ func fetchAndCacheData(url string, token string) (any, error) {
     return nil, err
 }
 
-func parseArboristPerms(Mappings any) (){
+/*
+Don't need this anymore if you assume that the resource path will exist in the data, so you can just 
+filter on the resource path and don't need to construct project ids from resource paths
+
+func resourcePathToProjects(resourcePath string, client gripql.Client ) ([]string, error){
+    
+    // Adapted from https://github.com/uc-cdis/peregrine/blob/master/peregrine/auth/__init__.py#L21
+    resourceParts := strings.Split(strings.Trim(resourcePath, "/"),"/")
+    // Some resource paths of improper form are ignored
+    if resourcePath != "/" && resourceParts[0] != "programs" {
+        return nil, nil
+    }
+    
+    if len(resourceParts) > 4 || (len(resourceParts) > 2 && resourceParts[2] != "projects"){
+        err := fmt.Errorf("ignoring resource path %s because peregrine cannot handle a permission more granular than program/project level", resourcePath)
+        return nil, err
+    }
+
+    var returnedProjects []string
+    // "/" or "/programs": access to all program's projects
+    if len(resourceParts) == 1{
+        // Currently no program node exists. If/when this changes this query will also have to change
+        q := gripql.V().HasLabel("Project").Fields("project_id")
+        result, err := client.Traversal(&gripql.GraphQuery{Graph: "synthea", Query: q.Statements})
+        if err != nil {
+            return nil, err
+        }
+
+        for r := range result {
+            returnedProjects = append(returnedProjects, r.GetVertex().Data.Fields["project_id"].GetStringValue())
+        }
+        return returnedProjects, nil
+    }
+
+    // "/programs/[...]" or "/programs/[...]/projects/":
+    // access to all projects of a program
+    // TODO: Need to implement programs in the data so that this if block can be used
+    if len(resourceParts) < 4 {
+        //program_name := parts[1]
+        // this query is supposed to be somethign like ().hasLabel("Program").has(string_value == program_name).Out("projects")
+        //template_query := "V().hasLabel('Program').has(string_value: " + program_name + ")"
+        fmt.Println("This /program[...] or /programs[...]/projects/ resource path format is not currently supported")
+        return nil, nil
+    }
 
 
+    /*
 
+    Don't currently have the entries in arborist to test this
+
+    program_code := resourceParts[1]
+    project_code := resourceParts[3]
+    q := gripql.V().HasLabel("Project").Has(gripql.Within("project_id", program_code + "-" + project_code)).Fields("project_id")
+    result, err := client.Traversal(&gripql.GraphQuery{Graph: "synthea", Query: q.Statements})
+    if err != nil {
+        return nil, err
+    }
+    for r := range result {
+        fmt.Println("HELLLLLLO", r)
+        append(returnedProjects, r.GetVertex().Data.Fields["project_id"].GetStringValue())
+    }
+
+    return nil, nil    
+    return nil, nil
+}
+*/
+
+// Permission checker adapted from https://github.com/uc-cdis/peregrine/blob/master/peregrine/auth/__init__.py#L98C13-L102C14
+func hasPermission(permissions []any) bool {
+    fmt.Println("ENTERING PERMS: ")
+	for _, permission := range permissions {
+        permission := permission.(map[string]any)
+		if ((permission["service"] == "*" || permission["service"] == "peregrine") && 
+           (permission["method"] == "*" || permission["method"] == "read")){
+            fmt.Println("PERMISSION SUCCESS", permission)
+			return true
+		}
+	}
+	return false
 }
 
+func getAllowedProjects(url string, token string) ([]string, error){
+    var readAccessResources []string
+    authMappings, err := getAuthMappings(url, token)
+    if err != nil{
+        return nil, err
+    }
+
+    // Iterate through /auth/mapping resultant dict checking for valid read permissions
+    for resourcePath, permissions := range authMappings.(map[string]any){
+        //potentialAllowedProjects, err := resourcePathToProjects(resourcePath, client)
+        //fmt.Println("HELLO?", reflect.TypeOf(permissions))
+        
+        //new_perms := permissions.([]map[string]any)
+        //fmt.Println("NEW PERMS: ", new_perms)
+        if hasPermission(permissions.([]any)){
+            readAccessResources = append(readAccessResources, resourcePath)
+        }
+        fmt.Println("VALUE OF READ ACCESS PROJECTS: ", readAccessResources)
+    }
+
+    // Remove any duplicate strings in the list by adding each value in the list
+    // to a new string only if it does not yet exist in the map[string]any
+    /* this probably also is not needed since resource paths are unique
+	tempDict := make(map[string]struct{})
+	var uniqueProjects []string
+	for _, project := range readAccessProjects {
+		if _, exists := tempDict[project]; !exists {
+			tempDict[project] = struct{}{}
+		    uniqueProjects = append(uniqueProjects, project)
+		}
+	}*/
+
+    return readAccessResources, nil
+}
 
 // buildQueryObject scans the built objects, which were derived from the list of vertex types
 // found in the schema. It then build a query object that will take search parameters
@@ -432,7 +542,6 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap, he
 	queryFields := graphql.Fields{}
 	// For each of the objects that have been listed in the objectMap build a query entry point
 	for objName, obj := range objects.objects {
-
 		label := obj.Name()
 		temp := []rune(label)
 		temp[0] = unicode.ToUpper(temp[0])
@@ -443,10 +552,12 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap, he
 			Type: graphql.NewList(obj),
 			Args: buildFieldConfigArgument(obj),
 			Resolve: func(params graphql.ResolveParams) (interface{}, error) {
-
+				
+				// Parse token out of header
 				token := header["Authorization"][0]
-				data, err := fetchAndCacheData("http://arborist-service/auth/mapping", token)
-				fmt.Println("CACHE: ", data)
+				Projects, err := getAllowedProjects("http://arborist-service/auth/mapping", token)
+                fmt.Println("ALLOWED PROJECTS: ", Projects)
+
 				// Schema hack to convert project_id typing to string whenever
 				// a query happens, but still accept lists because typed as a list
 				obj.Fields()["project_id"].Type = graphql.String
