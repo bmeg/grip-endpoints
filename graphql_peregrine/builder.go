@@ -7,6 +7,7 @@ import (
 	//"io"
 	//"net/http"
 	//"reflect"
+    "time"
 	"sync"
 	"unicode"
 
@@ -516,28 +517,62 @@ func _total_counts(client gripql.Client, graph string, node_type string, AuthLis
 			ARG_PROJECT_ID: &graphql.ArgumentConfig{Type: graphql.NewList(graphql.String)},
 		},
 		Resolve: func(p graphql.ResolveParams) (any, error) {
-			q := gripql.V().HasLabel(label).Has(gripql.Within("auth_resource_path", AuthList...))
-			q = apply_basic_filters(p, q)
-            //fmt.Println("VALUE OF Q IN TOTAL COUNTS: ", q)
+			//q := gripql.V().HasLabel(label).Has(gripql.Within("auth_resource_path", AuthList...))
+			//q = apply_basic_filters(p, q)
+            timestamp := time.Now().UnixNano() / int64(time.Millisecond)
+			unique_time := fmt.Sprintf("%d", timestamp)
+			query_name := "_" + node_type + "_count" + unique_time
 			aggs := []*gripql.Aggregate{
-				{Name: "_" + node_type + "_count", Aggregation: &gripql.Aggregate_Count{}},
+				{Name: query_name, Aggregation: &gripql.Aggregate_Count{}},
 			}
+
+            counts := map[string][]any{}
+			for _, i := range p.Info.FieldASTs {
+						if i.SelectionSet != nil {
+							for _, j := range i.SelectionSet.Selections {
+								if k, ok := j.(*ast.Field); ok {
+									if k.Name.Value != query_name {
+										aggs = append(aggs, &gripql.Aggregate{
+											Name: k.Name.Value,
+											Aggregation: &gripql.Aggregate_Term{
+												Term: &gripql.TermAggregation{
+													Field: k.Name.Value,
+												},
+											},
+										})
+										counts[k.Name.Value] = []any{}
+									}
+								}
+							}
+						}
+			}            
+            queries := []any{}
+            for _, val := range aggs{
+                fmt.Println("val",val)
+                q := gripql.V().HasLabel(label).Has(gripql.Within("auth_resource_path", AuthList...))
+                queries = append(queries, q)
+            }
+
 			out := map[string]any{}
-			q = q.Aggregate(aggs)
-			result, err := client.Traversal(&gripql.GraphQuery{Graph: graph, Query: q.Statements})
-			if err != nil {
-				return nil, err
-			}
-			if len(result) == 0 {
-				out["_"+node_type+"_count"] = 0
-			} else {
-			    for i := range result {
-				    agg := i.GetAggregations()
-				    out["_"+node_type+"_count"] = int(agg.Value)
+
+            for i := range queries {
+			    lister := []*gripql.Aggregate{aggs[i]}
+				queries[i] = queries[i].(*gripql.Query).Aggregate(lister)
+				result, err := client.Traversal(&gripql.GraphQuery{Graph: graph, Query: queries[i].(*gripql.Query).Statements})
+				if err != nil {
+					return nil, err
 			    }
-			}
-            fmt.Println("TOTAL COUNT FOR: ",node_type,"COUNT: ",out["_"+node_type+"_count"])
-			return out["_"+node_type+"_count"], nil
+			    if len(result) == 0 {
+				    out[query_name] = 0
+			    }
+			    for i := range result {
+                    agg := i.GetAggregations()
+				    out[query_name] = int(agg.Value)
+			    }
+        
+            }
+            fmt.Println("TOTAL COUNT FOR: ",node_type,"COUNT: ",out[query_name])
+			return out[query_name], nil
 		},
 	}
 }

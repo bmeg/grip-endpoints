@@ -233,7 +233,7 @@ func (tc *TokenCache) StoreToken(token string, auth UserAuth) {
 func (gh *graphHandler) setup(headers http.Header) error {
 	ts, _ := gh.client.GetTimestamp(gh.graph)
 
-    resourceList, ResourcesExist := gh.tokenCache.LookupToken(headers["Authorization"][0])
+    /*resourceList, ResourcesExist := gh.tokenCache.LookupToken(headers["Authorization"][0])
 
     // also chesk to see if token has expired
     if !ResourcesExist{
@@ -248,10 +248,15 @@ func (gh *graphHandler) setup(headers http.Header) error {
         gh.tokenCache.StoreToken(headers["Authorization"][0], userAuth)
     }
     fmt.Println("ENTERING SETUP FUNCTION ++++++++++++++++++++++++ ____________________ ------------_________++++++++++++++++++++", resourceList)
+    */
+
     
+    resourceList, err := getAllowedProjects("http://arborist-service/auth/mapping",headers["Authorization"][0])
+         if err != nil {
+             log.WithFields(log.Fields{"graph": gh.graph, "error": err}).Error("auth/mapping fetch and processing step failed")
+         }
 
-
-	if ts == nil || ts.Timestamp != gh.timestamp || ResourcesExist {
+	if ts == nil || ts.Timestamp != gh.timestamp || resourceList != nil {
         fmt.Println("YOU ARE HERE +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", resourceList)
 		log.WithFields(log.Fields{"graph": gh.graph}).Info("Reloading GraphQL schema")
 		schema, err := gh.client.GetSchema(gh.graph)
