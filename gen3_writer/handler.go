@@ -5,10 +5,12 @@ RESTFUL Gin Web endpoint
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 
 	"github.com/bmeg/grip/gripql"
 	"github.com/bmeg/grip/log"
@@ -36,7 +38,8 @@ func NewHTTPHandler(client gripql.Client) (http.Handler, error) {
 		h.AddGraph(c.Writer, c.Request, c.Param("graph"))
 	})
 	r.POST(":graph/bulk-load", func(c *gin.Context) {
-		h.BulkLoad(c.Writer, c.Request, c.Param("graph"))
+		h.BulkStream(c.Writer, c.Request, c.Param("graph"))
+		//h.BulkLoad(c.Writer, c.Request, c.Param("graph"))
 	})
 	r.DELETE(":graph/del-graph", func(c *gin.Context) {
 		h.DeleteGraph(c.Writer, c.Request, c.Param("graph"))
@@ -202,6 +205,132 @@ func (gh *Handler) WriteVertex(writer http.ResponseWriter, request *http.Request
 		log.WithFields(log.Fields{"graph": graph}).Info("[200]	POST	VERTEX: ", v)
 		http.Error(writer, fmt.Sprintln("[200]	POST	VERTEX: ", v), http.StatusOK)
 	}
+}
+
+func (gh *Handler) BulkStream(writer http.ResponseWriter, request *http.Request, graph string) error {
+	err := request.ParseMultipartForm(100 << 20) // 10 MB limit for the entire form
+	if err != nil {
+		fmt.Println("ERROR: ", err)
+		http.Error(writer, "Error parsing form", http.StatusBadRequest)
+		return err
+	}
+
+	// Get the file from the form data
+	file, handler, err := request.FormFile("file")
+	if err != nil {
+		http.Error(writer, "Error retrieving file from form", http.StatusBadRequest)
+		return err
+	}
+
+	defer file.Close()
+
+	fmt.Println("FILE RECIEVED: ", handler.Filename)
+	VertChan, err := StreamVerticesFromFile(file, 99)
+
+	if err != nil {
+		fmt.Println("ERROR: ", err)
+	}
+
+	//for line := range lineChan {
+	//	fmt.Println("LINE: ", line)
+	//}
+
+	count := 0
+	var logRate = 10000
+	elemChan := make(chan *gripql.GraphElement)
+	go func() {
+		if err := gh.client.BulkAdd(elemChan); err != nil {
+			log.Errorf("bulk add error: %v", err)
+		}
+	}()
+
+	for v := range VertChan {
+		count++
+		if count%logRate == 0 {
+			log.Infof("Loaded %d vertices", count)
+		}
+		elemChan <- &gripql.GraphElement{Graph: graph, Vertex: v}
+	}
+	log.Infof("Loaded total of %d vertices", count)
+	close(elemChan)
+
+	responseData := map[string]string{"status": "200", "message": "File uploaded successfully"}
+	responseJSON, err := json.Marshal(responseData)
+	if err != nil {
+		http.Error(writer, "Error encoding JSON response", http.StatusInternalServerError)
+		return err
+	}
+	writer.WriteHeader(http.StatusOK)
+	writer.Write(responseJSON)
+	return nil
+
+}
+
+func StreamVerticesFromFile(reader io.Reader, workers int) (chan *gripql.Vertex, error) {
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > 99 {
+		workers = 99
+	}
+
+	lineChan, err := processReader(reader)
+	if err != nil {
+		return nil, err
+	}
+
+	vertChan := make(chan *gripql.Vertex, workers)
+	var wg sync.WaitGroup
+
+	jum := protojson.UnmarshalOptions{DiscardUnknown: true}
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			for line := range lineChan {
+				v := &gripql.Vertex{}
+				err := jum.Unmarshal([]byte(line), v)
+				if err != nil {
+					log.WithFields(log.Fields{"error": err}).Errorf("Unmarshaling vertex: %s", line)
+				} else {
+					vertChan <- v
+				}
+			}
+			wg.Done()
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(vertChan)
+	}()
+
+	return vertChan, nil
+}
+
+func processReader(reader io.Reader) (<-chan string, error) {
+	scanner := bufio.NewScanner(reader)
+
+	chanSize := 100
+	buf := make([]byte, 0, 64*1024)
+	maxCapacity := 16 * 1024 * 1024
+	scanner.Buffer(buf, maxCapacity)
+
+	lineChan := make(chan string, chanSize)
+
+	go func() {
+		for scanner.Scan() {
+			line := scanner.Text()
+			lineChan <- line
+		}
+
+		if err := scanner.Err(); err != nil {
+			fmt.Println("Error reading from reader: %s", err)
+		}
+		close(lineChan)
+	}()
+
+	return lineChan, nil
 }
 
 func (gh *Handler) BulkLoad(writer http.ResponseWriter, request *http.Request, graph string) error {
