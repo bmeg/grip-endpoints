@@ -7,7 +7,8 @@ import (
 	"reflect"
 	"sort"
 	"time"
-	"unicode"
+    "strings"
+    "unicode"
 
 	"github.com/bmeg/grip/gripql"
 	"github.com/bmeg/grip/log"
@@ -308,9 +309,14 @@ func buildFieldConfigArgument(obj *graphql.Object) graphql.FieldConfigArgument {
 }
 
 func lower_first_char(name string) string {
-	temp := []rune(name)
-	temp[0] = unicode.ToLower(temp[0])
+	//temp := []rune(name)
+    temp := strings.ToLower(name)
 	return string(temp)
+}
+func upper_first_char(name string) string {
+    temp := []rune(name)
+    temp[0] = unicode.ToUpper(temp[0])
+    return string(temp)
 }
 
 func buildMappingField(client gripql.Client, graph string, objects *objectMap) *graphql.Field {
@@ -384,10 +390,7 @@ func buildAggregationField(client gripql.Client, graph string, objects *objectMa
 	queryFields := graphql.Fields{}
 	for k, obj := range objects.objects {
 		if len(obj.Fields()) > 0 {
-			label := obj.Name()
-			temp := []rune(label)
-			temp[0] = unicode.ToUpper(temp[0])
-			label = string(temp)
+			label := upper_first_char(obj.Name())
 
 			aggFields := graphql.Fields{
 				"_totalCount": &graphql.Field{Name: "_totalCount", Type: graphql.Int},
@@ -701,11 +704,8 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap, re
 	queryFields := graphql.Fields{}
 	// For each of the objects that have been listed in the objectMap build a query entry point
 	for objName, obj := range objects.objects {
-
-		label := obj.Name()
-		temp := []rune(label)
-		temp[0] = unicode.ToUpper(temp[0])
-		label = string(temp)
+        fmt.Println("UPPER CASE: ", obj.Name())
+        label := upper_first_char(obj.Name())
 		f := &graphql.Field{
 			Name: objName,
 			Type: graphql.NewList(obj),
