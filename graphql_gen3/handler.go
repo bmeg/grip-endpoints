@@ -34,7 +34,6 @@ import (
      }
  }
 
-
 // handle the graphql queries for a single endpoint
 type graphHandler struct {
 	graph      string
@@ -51,6 +50,14 @@ type Handler struct {
 	client   gripql.Client
 }
 
+type ServerError struct {
+    StatusCode int
+    Message string
+}
+
+func (e *ServerError) Error() string {
+    return e.Message
+}
 
 func getAuthMappings(url string, token string) (any, error) {
      GetRequest, err := http.NewRequest("GET", url, nil)
@@ -107,25 +114,34 @@ func getAuthMappings(url string, token string) (any, error) {
      if err != nil {
          return nil, err
      }
- 
+
      // Iterate through /auth/mapping resultant dict checking for valid read permissions
      for resourcePath, permissions := range authMappings.(map[string]any) {
-         // fmt.Println("RESOURCE PATH: ", resourcePath)
- 
          if hasPermission(permissions.([]any)) {
              readAccessResources = append(readAccessResources, resourcePath)
          }
      }
-     // fmt.Println("VALUE OF READ ACCESS RESOURCES: ", readAccessResources)
- 
+
      s := make([]interface{}, len(readAccessResources))
      for i, v := range readAccessResources {
          s[i] = v
      }
- 
-     // This readAccessResources value might need to be cached if the resources list gets too long
      return s, nil
  }
+
+ func handleError(err error, writer http.ResponseWriter) {
+    if ae, ok := err.(*ServerError); ok {
+        response := ServerError{StatusCode: ae.StatusCode, Message: ae.Message}
+        jsonResponse, _ := json.Marshal(response)
+        writer.WriteHeader(ae.StatusCode)
+        writer.Write(jsonResponse)
+    }else {
+        response := ServerError{StatusCode: http.StatusInternalServerError, Message: fmt.Sprintf("General error occured while setting up graphql handler")}
+        jsonResponse, _ := json.Marshal(response)
+        writer.WriteHeader(http.StatusInternalServerError)
+        writer.Write(jsonResponse)
+    }
+}
 
 // NewClientHTTPHandler initilizes a new GraphQLHandler
 func NewHTTPHandler(client gripql.Client) (http.Handler, error) {
@@ -166,26 +182,27 @@ func (gh *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) 
 	if handler, ok = gh.handlers[graphName]; ok {
 		//Call the setup function. If nothing has changed it will return without doing anything
 		err := handler.setup(request.Header)
-		if err != nil {
-			http.Error(writer, fmt.Sprintf("No GraphQL handler found for graph: %s", graphName), http.StatusInternalServerError)
-			return
-		}
+        if err != nil{
+            handleError(err, writer)
+            return
+        }
 	} else {
-
         tokenCache := NewTokenCache()
 		//Graph handler was not found, so we'll need to set it up
 		var err error
 		handler, err = newGraphHandler(graphName, gh.client, request.Header, tokenCache)
-		if err != nil {
-			http.Error(writer, fmt.Sprintf("No GraphQL handler found for graph: %s", graphName), http.StatusInternalServerError)
-			return
-		}
+        if err != nil{
+            handleError(err, writer)
+            return
+        }
 		gh.handlers[graphName] = handler
 	}
 	if handler != nil && handler.gqlHandler != nil {
 		handler.gqlHandler.ServeHTTP(writer, request)
 	} else {
-		http.Error(writer, fmt.Sprintf("No GraphQL handler found for graph: %s", graphName), http.StatusInternalServerError)
+         response := ServerError{StatusCode: http.StatusInternalServerError, Message: fmt.Sprintf("General error occured while setting up graphql handler")}
+         jsonResponse, _ := json.Marshal(response)
+         writer.Write(jsonResponse)
 	}
 }
 
@@ -203,14 +220,6 @@ func newGraphHandler(graph string, client gripql.Client, headers http.Header, us
 	return o, nil
 }
 
-func (tc *TokenCache) TokenExists (token string) (bool){
-     tc.mu.Lock()
-     defer tc.mu.Unlock()
-     _, tokenExists:= tc.cache[token]
-     return tokenExists
-}
-
-
 // LookupToken looks up a user token in the cache based on the token string.
 // but resource lists can change when users are given new permissions so it's probably better not to cache resourceLists
 func (tc *TokenCache) LookupResourceList(token string) ([]any) {
@@ -224,54 +233,47 @@ func (tc *TokenCache) LookupResourceList(token string) ([]any) {
 	return resourceList
 }
 
-// JWT auth token storage function
-func (tc *TokenCache) StoreToken(token string, auth UserAuth) {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-	tc.cache[token] = auth
-}
-
 // Check timestamp to see if schema needs to be updated or if the access token has changed
 // If so rebuild the schema
 func (gh *graphHandler) setup(headers http.Header) error {
-	ts, _ := gh.client.GetTimestamp(gh.graph)
+    // Check if Authorization header is present
+    authHeaders, ok := headers["Authorization"]
+    if !ok || len(authHeaders) == 0 {
+        return &ServerError{StatusCode: http.StatusUnauthorized, Message: "No authorization header provided."}
+    }
+    authToken := authHeaders[0]
 
-    /*tokenExists := gh.tokenCache.TokenExists(headers["Authorization"][0])
-    if !tokenExists{
-        userAuth := UserAuth{
-            AuthorizedResources: resourceList,
-            ExpiresAt: time.Now().Add(time.Hour),
-        }
-        gh.tokenCache.StoreToken(headers["Authorization"][0], userAuth)
-        tokenExists = true
-    }*/
+    ts, _ := gh.client.GetTimestamp(gh.graph)
+    fmt.Println("HEADERS: ", headers)
 
-    // get resourceList
-    resourceList, err := getAllowedProjects("http://arborist-service/auth/mapping", headers["Authorization"][0])
+    resourceList, err := getAllowedProjects("http://arborist-service/auth/mapping", authToken)
     if err != nil {
         log.WithFields(log.Fields{"graph": gh.graph, "error": err}).Error("auth/mapping fetch and processing step failed")
+        return  &ServerError{StatusCode: http.StatusUnauthorized, Message: fmt.Sprintf("%s", err)}
     }
 
-	if ts == nil || ts.Timestamp != gh.timestamp || resourceList != nil {
+    if ts == nil || ts.Timestamp != gh.timestamp || resourceList != nil {
         fmt.Println("YOU ARE HERE +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", resourceList)
-		log.WithFields(log.Fields{"graph": gh.graph}).Info("Reloading GraphQL schema")
-		schema, err := gh.client.GetSchema(gh.graph)
-		if err != nil {
-			log.WithFields(log.Fields{"graph": gh.graph, "error": err}).Error("GetSchema error")
-			return err
-		}
-		gqlSchema, err := buildGraphQLSchema(schema, gh.client, gh.graph, resourceList)
-		if err != nil {
-			log.WithFields(log.Fields{"graph": gh.graph, "error": err}).Error("GraphQL schema build failed")
-			gh.gqlHandler = nil
-			gh.timestamp = ""
-		} else {
-			log.WithFields(log.Fields{"graph": gh.graph}).Info("Built GraphQL schema")
-			gh.gqlHandler = handler.New(&handler.Config{
-				Schema: gqlSchema,
-			})
-			gh.timestamp = ts.Timestamp
-		}
-	}
-	return nil
+        log.WithFields(log.Fields{"graph": gh.graph}).Info("Reloading GraphQL schema")
+        schema, err := gh.client.GetSchema(gh.graph)
+        if err != nil {
+            log.WithFields(log.Fields{"graph": gh.graph, "error": err}).Error("GetSchema error")
+            return  &ServerError{StatusCode: http.StatusInternalServerError, Message: fmt.Sprintf("%s", err)}
+        }
+        gqlSchema, err := buildGraphQLSchema(schema, gh.client, gh.graph, resourceList)
+        if err != nil {
+            log.WithFields(log.Fields{"graph": gh.graph, "error": err}).Error("GraphQL schema build failed")
+            gh.gqlHandler = nil
+            gh.timestamp = ""
+            return &ServerError{StatusCode: http.StatusInternalServerError, Message: "GraphQL schema build failed"}
+        } else {
+            log.WithFields(log.Fields{"graph": gh.graph}).Info("Built GraphQL schema")
+            gh.gqlHandler = handler.New(&handler.Config{
+                Schema: gqlSchema,
+            })
+            gh.timestamp = ts.Timestamp
+        }
+    }
+
+    return nil
 }
