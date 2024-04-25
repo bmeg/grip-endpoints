@@ -1,10 +1,17 @@
 package main
 
 import (
+	//"encoding/json"
+	//"errors"
 	"fmt"
+	//"io"
+	//"net/http"
+	//"reflect"
+    "time"
+	"sync"
 	"unicode"
 
-	"reflect"
+	//"strings"
 
 	"github.com/bmeg/grip/gripql"
 	"github.com/bmeg/grip/log"
@@ -29,6 +36,8 @@ const (
 	accessible   Accessibility = "accessible"
 	unaccessible Accessibility = "unaccessible"
 )
+
+var cache = sync.Map{}
 
 var JSONScalar = graphql.NewScalar(graphql.ScalarConfig{
 	Name: "JSON",
@@ -56,7 +65,7 @@ var JSONScalar = graphql.NewScalar(graphql.ScalarConfig{
 // buildGraphQLSchema reads a GRIP graph schema (which is stored as a graph) and creates
 // a GraphQL-GO based schema. The GraphQL-GO schema all wraps the request functions that use
 // the gripql.Client to find the requested data
-func buildGraphQLSchema(schema *gripql.Graph, client gripql.Client, graph string) (*graphql.Schema, error) {
+func buildGraphQLSchema(schema *gripql.Graph, client gripql.Client, graph string, AuthList []any) (*graphql.Schema, error) {
 	if schema == nil {
 		return nil, fmt.Errorf("graphql.NewSchema error: nil gripql.Graph for graph: %s", graph)
 	}
@@ -68,8 +77,8 @@ func buildGraphQLSchema(schema *gripql.Graph, client gripql.Client, graph string
 	}
 
 	// Build the set of objects that exist in the query structuer
-	fmt.Println("OBJECT MAP: ", objectMap)
-	queryObj := buildQueryObject(client, graph, objectMap)
+	//fmt.Println("OBJECT MAP: ", objectMap)
+	queryObj := buildQueryObject(client, graph, objectMap, AuthList)
 	schemaConfig := graphql.SchemaConfig{
 		Query: queryObj,
 	}
@@ -363,29 +372,21 @@ func apply_basic_filters(p graphql.ResolveParams, q *gripql.Query) *gripql.Query
 		if val, ok := proj_arg.(string); ok {
 			q = q.Has(gripql.Eq(ARG_PROJECT_ID, val))
 		} else if filter_list, ok := proj_arg.([]any); ok {
-			list_len := len(filter_list)
-			if list_len == 1 {
-				q = q.Has(gripql.Eq(ARG_PROJECT_ID, filter_list[0].(string)))
-			} else if list_len > 1 {
-				final_expr := gripql.Or(gripql.Eq(ARG_PROJECT_ID, filter_list[0].(string)), gripql.Eq(ARG_PROJECT_ID, filter_list[1].(string)))
-				for i := 2; i < len(filter_list); i++ {
-					final_expr = gripql.Or(final_expr, gripql.Eq(ARG_PROJECT_ID, filter_list[i].(string)))
-				}
-				q = q.Has(final_expr)
-			}
+			q = q.Has(gripql.Within(ARG_PROJECT_ID, filter_list...))
 		}
 	}
 	return q
 }
 
-// buildQueryObject scans the built objects, which were derived from the list of vertex types
-// found in the schema. It then build a query object that will take search parameters
-// and create lists of objects of that type
-func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *graphql.Object {
+/*
+buildQueryObject scans the built objects, which were derived from the list of vertex types
+found in the schema. It then build a query object that will take search parameters
+and create lists of objects of that type
+*/
+func buildQueryObject(client gripql.Client, graph string, objects *objectMap, AuthList []any) *graphql.Object {
 	queryFields := graphql.Fields{}
 	// For each of the objects that have been listed in the objectMap build a query entry point
 	for objName, obj := range objects.objects {
-
 		label := obj.Name()
 		temp := []rune(label)
 		temp[0] = unicode.ToUpper(temp[0])
@@ -396,12 +397,15 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 			Type: graphql.NewList(obj),
 			Args: buildFieldConfigArgument(obj),
 			Resolve: func(params graphql.ResolveParams) (interface{}, error) {
+				// Parse token out of header
+				//token := header["Authorization"][0]
+				//read_access_projects, err := getAllowedProjects("http://arborist-service/auth/mapping", token)
 
 				// Schema hack to convert project_id typing to string whenever
 				// a query happens, but still accept lists because typed as a list
 				obj.Fields()["project_id"].Type = graphql.String
 
-				q := gripql.V().HasLabel(label)
+				q := gripql.V().HasLabel(label).Has(gripql.Within("auth_resource_path", AuthList...))
 				if id, ok := params.Args[ARG_ID].(string); ok {
 					fmt.Printf("Doing %s id=%s query", label, id)
 					q = gripql.V(id).HasLabel(label)
@@ -411,9 +415,9 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 					q = gripql.V(ids...).HasLabel(label)
 				}
 
-				for key, val := range params.Args {
-					fmt.Println("KEY: ", key, "VAL: ", val, reflect.TypeOf(val))
-					// check for absence of default argument [String] caused by providing no $name filter
+				for key, _ := range params.Args {
+					//fmt.Println("KEY: ", key, "VAL: ", val, reflect.TypeOf(val))
+					// Check for absence of default argument [String] caused by providing no $name filter
 					switch key {
 					case ARG_ID, ARG_IDS, ARG_LIMIT, ARG_OFFSET, ARG_ACCESS, ARG_SORT:
 					default:
@@ -421,10 +425,16 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 
 					}
 				}
-				fmt.Println("VALUE OF Q AFTER FILTER: ", q)
+				//fmt.Println("VALUE OF Q AFTER FILTER: ", q)
 				q = q.As("f0")
+                //fmt.Println("ARGS: ", params.Args)
+
 				limit := params.Args[ARG_LIMIT].(int)
-				offset := params.Args[ARG_OFFSET].(int)
+                offset := params.Args[ARG_OFFSET].(int)
+
+                if limit <= 0{
+                    limit = 100
+                }
 				q = q.Skip(uint32(offset)).Limit(uint32(limit))
 
 				rt := &renderTree{
@@ -442,13 +452,14 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 					render[i+"_data"] = "$" + i + "._data"
 				}
 				q = q.Render(render)
+
 				result, err := client.Traversal(&gripql.GraphQuery{Graph: graph, Query: q.Statements})
 				if err != nil {
+                    //fmt.Println("HELLO ERROR IN CLIENT TRAVERSAL LAND")
 					return nil, err
 				}
-
-				out := []any{}
-				for r := range result {
+                out := []any{}
+	            for r := range result {
 					values := r.GetRender().GetStructValue().AsMap()
 
 					data := map[string]map[string]any{}
@@ -470,18 +481,19 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 						}
 					}
 					out = append(out, data["f0"])
-				}
-				fmt.Println("QUERY END: ", q)
+                }
+				//fmt.Println("OUT: ", out)
 				return out, nil
 			},
 		}
+        //fmt.Println("THE VALUE OF F: ", f)
 		queryFields[objName] = f
 	}
 
-	queryFields["_observation_count"] = _total_counts(client, graph, "observation")
-	queryFields["_research_subject_count"] = _total_counts(client, graph, "research_subject")
-	queryFields["_specimen_count"] = _total_counts(client, graph, "specimen")
-	queryFields["_document_reference_count"] = _total_counts(client, graph, "document_reference")
+	queryFields["_observation_count"] = _total_counts(client, graph, "observation", AuthList)
+	queryFields["_research_subject_count"]= _total_counts(client, graph, "research_subject", AuthList)
+	queryFields["_specimen_count"] = _total_counts(client, graph, "specimen", AuthList)
+	queryFields["_document_reference_count"] = _total_counts(client, graph, "document_reference", AuthList)
 
 	query := graphql.NewObject(
 		graphql.ObjectConfig{
@@ -493,7 +505,7 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap) *g
 }
 
 // generalized function for getting total counts numbers filtered by project
-func _total_counts(client gripql.Client, graph string, node_type string) *graphql.Field {
+func _total_counts(client gripql.Client, graph string, node_type string, AuthList []any) *graphql.Field {
 	temp := []rune(node_type)
 	temp[0] = unicode.ToUpper(temp[0])
 	label := string(temp)
@@ -505,28 +517,62 @@ func _total_counts(client gripql.Client, graph string, node_type string) *graphq
 			ARG_PROJECT_ID: &graphql.ArgumentConfig{Type: graphql.NewList(graphql.String)},
 		},
 		Resolve: func(p graphql.ResolveParams) (any, error) {
-			q := gripql.V().HasLabel(label)
-			fmt.Println("PARGS: ", p.Args)
-			q = apply_basic_filters(p, q)
-			fmt.Println(" _total_counts QUERY: ", q)
+			//q := gripql.V().HasLabel(label).Has(gripql.Within("auth_resource_path", AuthList...))
+			//q = apply_basic_filters(p, q)
+            timestamp := time.Now().UnixNano() / int64(time.Millisecond)
+			unique_time := fmt.Sprintf("%d", timestamp)
+			query_name := "_" + node_type + "_count" + unique_time
 			aggs := []*gripql.Aggregate{
-				{Name: "_" + node_type + "_count", Aggregation: &gripql.Aggregate_Count{}},
+				{Name: query_name, Aggregation: &gripql.Aggregate_Count{}},
 			}
+
+            counts := map[string][]any{}
+			for _, i := range p.Info.FieldASTs {
+						if i.SelectionSet != nil {
+							for _, j := range i.SelectionSet.Selections {
+								if k, ok := j.(*ast.Field); ok {
+									if k.Name.Value != query_name {
+										aggs = append(aggs, &gripql.Aggregate{
+											Name: k.Name.Value,
+											Aggregation: &gripql.Aggregate_Term{
+												Term: &gripql.TermAggregation{
+													Field: k.Name.Value,
+												},
+											},
+										})
+										counts[k.Name.Value] = []any{}
+									}
+								}
+							}
+						}
+			}            
+            queries := []any{}
+            for _, val := range aggs{
+                fmt.Println("val",val)
+                q := gripql.V().HasLabel(label).Has(gripql.Within("auth_resource_path", AuthList...))
+                queries = append(queries, q)
+            }
+
 			out := map[string]any{}
-			q = q.Aggregate(aggs)
-			result, err := client.Traversal(&gripql.GraphQuery{Graph: graph, Query: q.Statements})
-			if err != nil {
-				return nil, err
-			}
-			if len(result) == 0 {
-				out["_"+node_type+"_count"] = 0
-			} else {
-				for i := range result {
-					agg := i.GetAggregations()
-					out["_"+node_type+"_count"] = int(agg.Value)
-				}
-			}
-			return out["_"+node_type+"_count"], nil
+
+            for i := range queries {
+			    lister := []*gripql.Aggregate{aggs[i]}
+				queries[i] = queries[i].(*gripql.Query).Aggregate(lister)
+				result, err := client.Traversal(&gripql.GraphQuery{Graph: graph, Query: queries[i].(*gripql.Query).Statements})
+				if err != nil {
+					return nil, err
+			    }
+			    if len(result) == 0 {
+				    out[query_name] = 0
+			    }
+			    for i := range result {
+                    agg := i.GetAggregations()
+				    out[query_name] = int(agg.Value)
+			    }
+        
+            }
+            fmt.Println("TOTAL COUNT FOR: ",node_type,"COUNT: ",out[query_name])
+			return out[query_name], nil
 		},
 	}
 }

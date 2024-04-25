@@ -24,7 +24,8 @@
         "project_id":  "STRING",
         "status":  "STRING",
         "type":  "STRING",
-        "type_coding":  "STRING"
+        "type_coding": "STRING",
+        "auth_resource_path": "STRING"
       }
     },
     {
@@ -54,7 +55,8 @@
         "valueRange":  "STRING",
         "valueRatio":  "STRING",
         "valueSampledData":  "STRING",
-        "valueString":  "STRING"
+        "valueString":  "STRING",
+        "auth_resource_path": "STRING"
       }
     },
     {
@@ -85,7 +87,8 @@
         "us_core_ethnicity_coding_coding":  "STRING",
         "us_core_race":  "STRING",
         "us_core_race_coding":  "STRING",
-        "us_core_race_coding_coding":  "STRING"
+        "us_core_race_coding_coding":  "STRING",
+        "auth_resource_path": "STRING"
       }
     },
     {
@@ -95,6 +98,8 @@
         "code":  "STRING",
         "id":  "STRING",
         "name":  "STRING",
+        "availability_type": "STRING",
+        "auth_resource_path": "STRING",
         "project_id": "STRLIST"
       }
     }

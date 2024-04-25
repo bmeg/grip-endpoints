@@ -33,3 +33,4 @@ COPY --from=build-env /graphql_peregrine.so /data/
 COPY --from=build-env /schema.json /data/
 COPY --from=build-env /mongo.yml /data/
 COPY --from=build-env /go/bin/grip /app/
+
