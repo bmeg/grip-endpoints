@@ -228,12 +228,12 @@ func HandleBody(request *http.Request) (map[string]any, error){
 
     if body == nil {
         return nil, err
-    } 
+    }
 
     if err := json.Unmarshal([]byte(body), &json_map); err != nil {
         return nil, err
     }
-    
+
     return json_map, nil
 }
 
@@ -331,7 +331,7 @@ func StreamVerticesFromReader(reader io.Reader, workers int) (chan *gripql.Verte
 	var wg sync.WaitGroup
 
 	jum := protojson.UnmarshalOptions{DiscardUnknown: true}
-    
+
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
