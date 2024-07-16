@@ -3,12 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"google.golang.org/protobuf/encoding/protojson"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
-    "strings"
-    "unicode"
+	"unicode"
+
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/bmeg/grip/gripql"
 	"github.com/bmeg/grip/log"
@@ -93,8 +94,8 @@ func buildField(x string) (*graphql.Field, error) {
 		o = &graphql.Field{Type: graphql.String}
 	case "BOOL":
 		o = &graphql.Field{Type: graphql.Boolean}
-    case "STRLIST":
-         o = &graphql.Field{Type: graphql.String}
+	case "STRLIST":
+		o = &graphql.Field{Type: graphql.String}
 	default:
 		return nil, fmt.Errorf("%s does not map to a GQL type", x)
 	}
@@ -310,13 +311,13 @@ func buildFieldConfigArgument(obj *graphql.Object) graphql.FieldConfigArgument {
 
 func lower_first_char(name string) string {
 	//temp := []rune(name)
-    temp := strings.ToLower(name)
+	temp := strings.ToLower(name)
 	return string(temp)
 }
 func upper_first_char(name string) string {
-    temp := []rune(name)
-    temp[0] = unicode.ToUpper(temp[0])
-    return string(temp)
+	temp := []rune(name)
+	temp[0] = unicode.ToUpper(temp[0])
+	return string(temp)
 }
 
 func buildMappingField(client gripql.Client, graph string, objects *objectMap) *graphql.Field {
@@ -482,7 +483,7 @@ func buildAggregationField(client gripql.Client, graph string, objects *objectMa
 						for i := range queries {
 							lister := []*gripql.Aggregate{aggs[i]}
 							queries[i] = queries[i].(*gripql.Query).Aggregate(lister)
-							result, err := client.Traversal(&gripql.GraphQuery{Graph: graph, Query: queries[i].(*gripql.Query).Statements})
+							result, err := client.Traversal(p.Context, &gripql.GraphQuery{Graph: graph, Query: queries[i].(*gripql.Query).Statements})
 							if err != nil {
 								return nil, err
 							}
@@ -586,7 +587,7 @@ func buildAggregationField(client gripql.Client, graph string, objects *objectMa
 					} else {
 						q := gripql.V().HasLabel(label).Has(gripql.Within("auth_resource_path", resourceList...))
 						q = q.Aggregate(aggs)
-						result, err := client.Traversal(&gripql.GraphQuery{Graph: graph, Query: q.Statements})
+						result, err := client.Traversal(p.Context, &gripql.GraphQuery{Graph: graph, Query: q.Statements})
 						if err != nil {
 							return nil, err
 						}
@@ -704,8 +705,8 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap, re
 	queryFields := graphql.Fields{}
 	// For each of the objects that have been listed in the objectMap build a query entry point
 	for objName, obj := range objects.objects {
-        fmt.Println("UPPER CASE: ", obj.Name())
-        label := upper_first_char(obj.Name())
+		fmt.Println("UPPER CASE: ", obj.Name())
+		label := upper_first_char(obj.Name())
 		f := &graphql.Field{
 			Name: objName,
 			Type: graphql.NewList(obj),
@@ -765,7 +766,7 @@ func buildQueryObject(client gripql.Client, graph string, objects *objectMap, re
 					render[i+"_data"] = "$" + i + "._data"
 				}
 				q = q.Render(render)
-				result, err := client.Traversal(&gripql.GraphQuery{Graph: graph, Query: q.Statements})
+				result, err := client.Traversal(params.Context, &gripql.GraphQuery{Graph: graph, Query: q.Statements})
 				if err != nil {
 					return nil, err
 				}

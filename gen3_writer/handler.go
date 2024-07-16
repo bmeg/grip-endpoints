@@ -5,12 +5,12 @@ RESTFUL Gin Web endpoint
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-    "sync"
-	"bufio"
+	"sync"
 
 	"github.com/bmeg/grip/gripql"
 	"github.com/bmeg/grip/log"
@@ -24,7 +24,7 @@ type Handler struct {
 	client gripql.Client
 }
 
-func NewHTTPHandler(client gripql.Client) (http.Handler, error) {
+func NewHTTPHandler(client gripql.Client, config map[string]string) (http.Handler, error) {
 	r := gin.Default()
 	h := &Handler{
 		router: r,
@@ -408,7 +408,7 @@ func processReader(reader io.Reader) (<-chan string, error) {
 
 	lineChan := make(chan string, chanSize)
 
-	go func() { 
+	go func() {
         for scanner.Scan() {
 			line := scanner.Text()
 			lineChan <- line
@@ -432,7 +432,7 @@ func (gh *Handler) BulkLoad(c *gin.Context, writer http.ResponseWriter, request 
 	log.WithFields(log.Fields{"graph": graph}).Info("loading data")
 
 
-    // Get request body to check for edges or vertices 
+    // Get request body to check for edges or vertices
     if json_map, err = HandleBody(request); err != nil{
         RegError(c, writer, graph, err)
     }
