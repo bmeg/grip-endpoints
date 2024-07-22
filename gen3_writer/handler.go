@@ -22,13 +22,26 @@ import (
 type Handler struct {
 	router *gin.Engine
 	client gripql.Client
+	config map[string]string
 }
 
 func NewHTTPHandler(client gripql.Client, config map[string]string) (http.Handler, error) {
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Logger())
+	r.Use(gin.Recovery())
+
+	// Was getting 404s before adding this. Not 100% sure why
+	r.RemoveExtraSlash = true
+	r.NoRoute(func(c *gin.Context) {
+		fmt.Printf("404: %#v\n", c.Request.URL)
+		fmt.Printf("404: %#v\n", c.Request.RequestURI)
+
+	})
+
 	h := &Handler{
 		router: r,
 		client: client,
+		config: config,
 	}
 
 	r.POST(":graph/add-vertex", func(c *gin.Context) {
@@ -62,28 +75,26 @@ func NewHTTPHandler(client gripql.Client, config map[string]string) (http.Handle
 	r.GET(":graph/get-vertex/:vertex-id", func(c *gin.Context) {
 		h.GetVertex(c, c.Writer, c.Request, c.Param("graph"), c.Param("vertex-id"))
 	})
-	r.GET(":graph", func(c *gin.Context) {
-		if c.Param("graph") == "list-graphs" {
-			h.ListGraphs(c, c.Writer)
-		}
+
+	r.GET("list-graphs", func(c *gin.Context) {
+		h.ListGraphs(c, c.Writer)
 	})
+
 	return h, nil
 }
 
 // ServeHTTP responds to HTTP graphql requests
 func (gh *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	/*fmt.Println("REQUEST", request)
-	fmt.Println("WRITER", writer)*/
 	gh.router.ServeHTTP(writer, request)
 }
 
 func RegError(c *gin.Context, writer http.ResponseWriter, graph string, err error) {
 	log.WithFields(log.Fields{"graph": graph, "error": err})
-    c.JSON(http.StatusOK, gin.H{
-              "status":  "500",
-              "message": "Internal Server Error",
-              "data":    nil,
-    })
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "500",
+		"message": "Internal Server Error",
+		"data":    nil,
+	})
 	http.Error(writer, fmt.Sprintln("[500]	graph", graph, "error:", err), http.StatusInternalServerError)
 }
 
@@ -117,10 +128,10 @@ func (gh *Handler) GetGraph(c *gin.Context, writer http.ResponseWriter, request 
 
 func (gh *Handler) ListGraphs(c *gin.Context, writer http.ResponseWriter) {
 	if graphs, err := gh.client.ListGraphs(); err != nil {
-		RegError(c, writer,  "", err)
-	} else if err == nil{
+		RegError(c, writer, "", err)
+	} else if err == nil {
 		log.WithFields(log.Fields{}).Info(graphs)
-        c.JSON(http.StatusOK, gin.H{
+		c.JSON(http.StatusOK, gin.H{
 			"status":  "200",
 			"message": "GET list-graphs successful",
 			"data":    graphs,
@@ -216,25 +227,24 @@ func (gh *Handler) WriteVertex(c *gin.Context, writer http.ResponseWriter, reque
 	}
 }
 
+func HandleBody(request *http.Request) (map[string]any, error) {
+	var body []byte
+	var err error
+	json_map := map[string]any{}
 
-func HandleBody(request *http.Request) (map[string]any, error){
-    var body []byte
-    var err error
-    json_map := map[string]any{}
+	if body, err = io.ReadAll(request.Body); err != nil {
+		return nil, err
+	}
 
-    if body, err = io.ReadAll(request.Body); err != nil {
-        return nil, err
-    }
+	if body == nil {
+		return nil, err
+	}
 
-    if body == nil {
-        return nil, err
-    }
+	if err := json.Unmarshal([]byte(body), &json_map); err != nil {
+		return nil, err
+	}
 
-    if err := json.Unmarshal([]byte(body), &json_map); err != nil {
-        return nil, err
-    }
-
-    return json_map, nil
+	return json_map, nil
 }
 
 func (gh *Handler) BulkStream(c *gin.Context, writer http.ResponseWriter, request *http.Request, graph string) error {
@@ -245,8 +255,8 @@ func (gh *Handler) BulkStream(c *gin.Context, writer http.ResponseWriter, reques
 		return err
 	}
 
-    request_type := request.MultipartForm.Value["type"][0]
-    fmt.Println("VALUE OF REQUEST TYPE: ", request_type)
+	request_type := request.MultipartForm.Value["type"][0]
+	fmt.Println("VALUE OF REQUEST TYPE: ", request_type)
 
 	// Get the file from the form data
 	file, handler, err := request.FormFile("file")
@@ -257,52 +267,52 @@ func (gh *Handler) BulkStream(c *gin.Context, writer http.ResponseWriter, reques
 
 	defer file.Close()
 	fmt.Println("FILE RECIEVED: ", handler.Filename)
-    var logRate = 10000
+	var logRate = 10000
 
-    elemChan := make(chan *gripql.GraphElement)
-    go func() {
-        if err := gh.client.BulkAdd(elemChan); err != nil {
-            log.Errorf("bulk add error: %v", err)
-        }
-    }()
+	elemChan := make(chan *gripql.GraphElement)
+	go func() {
+		if err := gh.client.BulkAdd(elemChan); err != nil {
+			log.Errorf("bulk add error: %v", err)
+		}
+	}()
 
-    if request_type == "vertex" {
-        VertChan, err := StreamVerticesFromReader(file, 99)
-        if err != nil{
-            return err
-        }
-        count := 0
+	if request_type == "vertex" {
+		VertChan, err := StreamVerticesFromReader(file, 99)
+		if err != nil {
+			return err
+		}
+		count := 0
 
-        for v := range VertChan {
-            count++
-            if count%logRate == 0 {
-                log.Infof("Loaded %d vertices", count)
-            }
-            elemChan <- &gripql.GraphElement{Graph: graph, Vertex: v}
-        }
-        log.Infof("Loaded total of %d vertices", count)
-    }
+		for v := range VertChan {
+			count++
+			if count%logRate == 0 {
+				log.Infof("Loaded %d vertices", count)
+			}
+			elemChan <- &gripql.GraphElement{Graph: graph, Vertex: v}
+		}
+		log.Infof("Loaded total of %d vertices", count)
+	}
 
-    if request_type == "edge" {
-        EdgeChan, err := StreamEdgesFromReader(file, 99)
-        if err != nil{
-            return err
-        }
-        count := 0
-        for e := range EdgeChan {
-            count++
-            if count % logRate == 0 {
-                log.Infof("Loaded %d vertices", count)
-            }
-            elemChan <- &gripql.GraphElement{Graph: graph, Edge: e}
-        }
-        log.Infof("Loaded total of %d edges", count)
-    }
+	if request_type == "edge" {
+		EdgeChan, err := StreamEdgesFromReader(file, 99)
+		if err != nil {
+			return err
+		}
+		count := 0
+		for e := range EdgeChan {
+			count++
+			if count%logRate == 0 {
+				log.Infof("Loaded %d vertices", count)
+			}
+			elemChan <- &gripql.GraphElement{Graph: graph, Edge: e}
+		}
+		log.Infof("Loaded total of %d edges", count)
+	}
 
-    close(elemChan)
-    //<-wait
+	close(elemChan)
+	//<-wait
 
-    responseData := map[string]string{"status" : "200", "message": "File uploaded successfully"}
+	responseData := map[string]string{"status": "200", "message": "File uploaded successfully"}
 	responseJSON, err := json.Marshal(responseData)
 	if err != nil {
 		http.Error(writer, "Error encoding JSON response", http.StatusInternalServerError)
@@ -322,7 +332,7 @@ func StreamVerticesFromReader(reader io.Reader, workers int) (chan *gripql.Verte
 		workers = 99
 	}
 
-    lineChan, err := processReader(reader)
+	lineChan, err := processReader(reader)
 	if err != nil {
 		return nil, err
 	}
@@ -357,46 +367,46 @@ func StreamVerticesFromReader(reader io.Reader, workers int) (chan *gripql.Verte
 }
 
 func StreamEdgesFromReader(reader io.Reader, workers int) (chan *gripql.Edge, error) {
-     if workers < 1 {
-         workers = 1
-     }
-     if workers > 99 {
-         workers = 99
-     }
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > 99 {
+		workers = 99
+	}
 
-     lineChan, err := processReader(reader)
-     if err != nil {
-         return nil, err
-     }
+	lineChan, err := processReader(reader)
+	if err != nil {
+		return nil, err
+	}
 
-     edgeChan := make(chan *gripql.Edge, workers)
-     var wg sync.WaitGroup
+	edgeChan := make(chan *gripql.Edge, workers)
+	var wg sync.WaitGroup
 
-     jum := protojson.UnmarshalOptions{DiscardUnknown: true}
+	jum := protojson.UnmarshalOptions{DiscardUnknown: true}
 
-     for i := 0; i < workers; i++ {
-         wg.Add(1)
-         go func() {
-             for line := range lineChan {
-                 v := &gripql.Edge{}
-                 err := jum.Unmarshal([]byte(line), v)
-                 if err != nil {
-                     log.WithFields(log.Fields{"error": err}).Errorf("Unmarshaling edge: %s", line)
-                 } else {
-                     edgeChan <- v
-                 }
-             }
-             wg.Done()
-         }()
-     }
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			for line := range lineChan {
+				v := &gripql.Edge{}
+				err := jum.Unmarshal([]byte(line), v)
+				if err != nil {
+					log.WithFields(log.Fields{"error": err}).Errorf("Unmarshaling edge: %s", line)
+				} else {
+					edgeChan <- v
+				}
+			}
+			wg.Done()
+		}()
+	}
 
-     go func() {
-         wg.Wait()
-         close(edgeChan)
-     }()
+	go func() {
+		wg.Wait()
+		close(edgeChan)
+	}()
 
-     return edgeChan, nil
- }
+	return edgeChan, nil
+}
 
 func processReader(reader io.Reader) (<-chan string, error) {
 	scanner := bufio.NewScanner(reader)
@@ -409,7 +419,7 @@ func processReader(reader io.Reader) (<-chan string, error) {
 	lineChan := make(chan string, chanSize)
 
 	go func() {
-        for scanner.Scan() {
+		for scanner.Scan() {
 			line := scanner.Text()
 			lineChan <- line
 		}
@@ -423,19 +433,17 @@ func processReader(reader io.Reader) (<-chan string, error) {
 	return lineChan, nil
 }
 
-
 func (gh *Handler) BulkLoad(c *gin.Context, writer http.ResponseWriter, request *http.Request, graph string) error {
 	var workerCount = 1
 	var logRate = 10000
-    var err error;
-    var json_map map[string]any;
+	var err error
+	var json_map map[string]any
 	log.WithFields(log.Fields{"graph": graph}).Info("loading data")
 
-
-    // Get request body to check for edges or vertices
-    if json_map, err = HandleBody(request); err != nil{
-        RegError(c, writer, graph, err)
-    }
+	// Get request body to check for edges or vertices
+	if json_map, err = HandleBody(request); err != nil {
+		RegError(c, writer, graph, err)
+	}
 
 	elemChan := make(chan *gripql.GraphElement)
 	go func() {
