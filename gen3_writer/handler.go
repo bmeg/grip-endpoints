@@ -6,54 +6,52 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"sync"
-    "context"
 
+	"github.com/bmeg/grip-graphql/middleware"
+	"github.com/bmeg/grip/gdbi"
 	"github.com/bmeg/grip/gripql"
-    "github.com/bmeg/grip/gdbi"
-    "go.mongodb.org/mongo-driver/bson"
-    "github.com/bmeg/grip/util"
 	"github.com/bmeg/grip/log"
+	"github.com/bmeg/grip/mongo"
+	"github.com/bmeg/grip/util"
 	"github.com/gin-gonic/gin"
+	"github.com/mongodb/mongo-tools/common/db"
+	"go.mongodb.org/mongo-driver/bson"
+	mgo "go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"google.golang.org/protobuf/encoding/protojson"
-    mgo "go.mongodb.org/mongo-driver/mongo"
-    "github.com/mongodb/mongo-tools/common/db"
-    "go.mongodb.org/mongo-driver/mongo/options"
-    "github.com/bmeg/grip/mongo"
-    "github.com/bmeg/grip-graphql/middleware"
-
 )
-
 
 type Handler struct {
 	router *gin.Engine
 	client gripql.Client
-    config map[string]string
+	config map[string]string
 }
 
 func NewHTTPHandler(client gripql.Client, config map[string]string) (http.Handler, error) {
-    r := gin.New()
-    r.Use(gin.Logger())
-    r.Use(gin.Recovery())
+	r := gin.New()
+	r.Use(gin.Logger())
+	r.Use(gin.Recovery())
 
-    // Was getting 404s before adding this. Not 100% sure why
-    r.RemoveExtraSlash = true
+	// Was getting 404s before adding this. Not 100% sure why
+	r.RemoveExtraSlash = true
 
-    r.NoRoute(func(c *gin.Context) {
-        fmt.Printf("RAW PATH 404: %#v\n", c.Request.URL.RawPath)
-        fmt.Printf("PATH 404: %#v\n", c.Request.URL.Path)
+	r.NoRoute(func(c *gin.Context) {
+		fmt.Printf("RAW PATH 404: %#v\n", c.Request.URL.RawPath)
+		fmt.Printf("PATH 404: %#v\n", c.Request.URL.Path)
 
-    })
+	})
 
-    h := &Handler{
-          router: r,
-          client: client,
-          config: config,
-    }
+	h := &Handler{
+		router: r,
+		client: client,
+		config: config,
+	}
 
 	r.POST(":graph/add-vertex", func(c *gin.Context) {
 		h.WriteVertex(c, c.Writer, c.Request, c.Param("graph"))
@@ -62,7 +60,10 @@ func NewHTTPHandler(client gripql.Client, config map[string]string) (http.Handle
 		h.AddGraph(c, c.Writer, c.Request, c.Param("graph"))
 	})
 	r.POST(":graph/bulk-load", func(c *gin.Context) {
-        h.MongoBulk(c, c.Writer, c.Request, c.Param("graph"))
+		h.MongoBulk(c, c.Writer, c.Request, c.Param("graph"))
+	})
+	r.POST(":graph/bulk-test", func(c *gin.Context) {
+		h.BulkStream(c, c.Writer, c.Request, c.Param("graph"))
 	})
 	r.DELETE(":graph/del-graph", func(c *gin.Context) {
 		h.DeleteGraph(c, c.Writer, c.Request, c.Param("graph"))
@@ -86,9 +87,9 @@ func NewHTTPHandler(client gripql.Client, config map[string]string) (http.Handle
 		h.GetVertex(c, c.Writer, c.Request, c.Param("graph"), c.Param("vertex-id"))
 	})
 
-    r.GET("list-graphs", func(c *gin.Context) {
-        fmt.Printf("RAW PATH: %#v\n", c.Request.URL.RawPath)
-        fmt.Printf("PATH: %#v\n", c.Request.URL.Path)
+	r.GET("list-graphs", func(c *gin.Context) {
+		fmt.Printf("RAW PATH: %#v\n", c.Request.URL.RawPath)
+		fmt.Printf("PATH: %#v\n", c.Request.URL.Path)
 		h.ListGraphs(c, c.Writer)
 	})
 
@@ -102,27 +103,27 @@ func (gh *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) 
 
 func RegError(c *gin.Context, writer http.ResponseWriter, graph string, err error) {
 	log.WithFields(log.Fields{"graph": graph, "error": err})
-    if ae, ok := err.(*middleware.ServerError); ok {
-        c.JSON(ae.StatusCode, gin.H{
-               "status":  ae.StatusCode,
-               "message": ae.Message,
-               "data":    nil,
-        })
-        http.Error(writer, fmt.Sprintln("[",ae.StatusCode,"] graph: ", graph, "error: ", ae.Message), ae.StatusCode)
-        return
-    }
-    c.JSON(http.StatusInternalServerError, gin.H{
-          "status":  "500",
-          "message": "Internal Server Error",
-          "data":    nil,
-    })
+	if ae, ok := err.(*middleware.ServerError); ok {
+		c.JSON(ae.StatusCode, gin.H{
+			"status":  ae.StatusCode,
+			"message": ae.Message,
+			"data":    nil,
+		})
+		http.Error(writer, fmt.Sprintln("[", ae.StatusCode, "] graph: ", graph, "error: ", ae.Message), ae.StatusCode)
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{
+		"status":  "500",
+		"message": "Internal Server Error",
+		"data":    nil,
+	})
 	http.Error(writer, fmt.Sprintln("[500]	graph", graph, "error:", err), http.StatusInternalServerError)
 }
 
 func (gh *Handler) ListLabels(c *gin.Context, writer http.ResponseWriter, request *http.Request, graph string) {
 	if labels, err := gh.client.ListLabels(graph); err != nil {
 		RegError(c, writer, graph, err)
-    } else {
+	} else {
 		log.WithFields(log.Fields{"graph": graph}).Info(labels)
 		http.Error(writer, fmt.Sprintln("[200]	GET:", graph, " ", labels), http.StatusOK)
 	}
@@ -133,8 +134,8 @@ func (gh *Handler) GetSchema(c *gin.Context, writer http.ResponseWriter, request
 		RegError(c, writer, graph, err)
 	} else {
 		log.WithFields(log.Fields{"graph": graph}).Info(schema)
-        writer.WriteHeader(http.StatusOK)
-	    fmt.Fprintln(writer, fmt.Sprintln("[200]  GET:", graph, " ", schema))
+		writer.WriteHeader(http.StatusOK)
+		fmt.Fprintln(writer, fmt.Sprintln("[200]  GET:", graph, " ", schema))
 	}
 }
 
@@ -149,10 +150,10 @@ func (gh *Handler) GetGraph(c *gin.Context, writer http.ResponseWriter, request 
 
 func (gh *Handler) ListGraphs(c *gin.Context, writer http.ResponseWriter) {
 	if graphs, err := gh.client.ListGraphs(); err != nil {
-		RegError(c, writer,  "", err)
-	} else if err == nil{
+		RegError(c, writer, "", err)
+	} else if err == nil {
 		log.WithFields(log.Fields{}).Info(graphs)
-        c.JSON(http.StatusOK, gin.H{
+		c.JSON(http.StatusOK, gin.H{
 			"status":  "200",
 			"message": "GET list-graphs successful",
 			"data":    graphs,
@@ -248,140 +249,139 @@ func (gh *Handler) WriteVertex(c *gin.Context, writer http.ResponseWriter, reque
 	}
 }
 
+func HandleBody(request *http.Request) (map[string]any, error) {
+	var body []byte
+	var err error
+	json_map := map[string]any{}
 
-func HandleBody(request *http.Request) (map[string]any, error){
-    var body []byte
-    var err error
-    json_map := map[string]any{}
+	if body, err = io.ReadAll(request.Body); err != nil {
+		return nil, err
+	}
 
-    if body, err = io.ReadAll(request.Body); err != nil {
-        return nil, err
-    }
+	if body == nil {
+		return nil, err
+	}
 
-    if body == nil {
-        return nil, err
-    }
+	if err := json.Unmarshal([]byte(body), &json_map); err != nil {
+		return nil, err
+	}
 
-    if err := json.Unmarshal([]byte(body), &json_map); err != nil {
-        return nil, err
-    }
-
-    return json_map, nil
+	return json_map, nil
 }
 
+func (gh *Handler) MongoBulk(c *gin.Context, writer http.ResponseWriter, request *http.Request, graph string) {
+	var workerCount = 50
+	var database = "gripdb"
+	var logRate = 10000
+	var bulkBufferSize = 1000
 
-var bulkBufferSize = 1000
-var logRate = 10000
-var database = "gripdb"
-var workerCount = 50
-func (gh *Handler) MongoBulk(c *gin.Context, writer http.ResponseWriter, request *http.Request, graph string){
-    err := request.ParseMultipartForm(1024 * 1024 * 1024) // 10 GB limit
-    if err != nil {
-        RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: fmt.Sprintf("failed to parse multipart form: %s", err)})
-        return
-    }
-
-    args := request.MultipartForm.Value
-    request_type_list, ok := args["type"]
-    if !ok {
-        RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: "Server must specify GraphElement Type, no value found for 'type'"}) 
-        return
-    }
-    request_type  := request_type_list[0]
-    fill_gid_list, ok := args["fill_gid"];
-    var fill_gid string
-    if ok{
-       fill_gid = fill_gid_list[0]
-    }
-
-    mongoHost_list, ok := args["mongo_host"];
-    var mongoHost string
-    if ok{
-        mongoHost = mongoHost_list[0]
-    } else if !ok{
-        mongoHost = "mongodb://local-mongodb"
-    }
-
-    file, handler, err := request.FormFile("file")
-    if err != nil {
-        RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: fmt.Sprintf("failed to parse attached file: %s", err)})
-        return
-    }
-    file.Close()
-
-    client, err := mgo.NewClient(options.Client().ApplyURI(mongoHost))
+	err := request.ParseMultipartForm(1024 * 1024 * 1024) // 10 GB limit
 	if err != nil {
-		RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("%s", err)})
-        return
+		RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: fmt.Sprintf("failed to parse multipart form: %s", err)})
+		return
 	}
 
-    err = client.Connect(context.TODO())
-	if err != nil {
-		RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("%s", err)})
-        return
+	args := request.MultipartForm.Value
+	request_type_list, ok := args["type"]
+	if !ok {
+		RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: "Server must specify GraphElement Type, no value found for 'type'"})
+		return
+	}
+	request_type := request_type_list[0]
+	fill_gid_list, ok := args["fill_gid"]
+	var fill_gid string
+	if ok {
+		fill_gid = fill_gid_list[0]
 	}
 
-    vertexCol := client.Database(database).Collection(fmt.Sprintf("%s_vertices", graph))
+	mongoHost_list, ok := args["mongo_host"]
+	var mongoHost string
+	if ok {
+		mongoHost = mongoHost_list[0]
+	} else if !ok {
+		mongoHost = "mongodb://local-mongodb"
+	}
+
+	file, handler, err := request.FormFile("file")
+	if err != nil {
+		RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: fmt.Sprintf("failed to parse attached file: %s", err)})
+		return
+	}
+	file.Close()
+
+	client, err := mgo.NewClient(options.Client().ApplyURI(mongoHost))
+	if err != nil {
+		RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("%s", err)})
+		return
+	}
+
+	err = client.Connect(context.TODO())
+	if err != nil {
+		RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("%s", err)})
+		return
+	}
+
+	vertexCol := client.Database(database).Collection(fmt.Sprintf("%s_vertices", graph))
 	edgeCol := client.Database(database).Collection(fmt.Sprintf("%s_edges", graph))
 
-    if request_type == "vertex" {
-        log.Infof("Loading vertex file: %s", handler.Filename)
-        vertInserter := db.NewUnorderedBufferedBulkInserter(vertexCol, bulkBufferSize).
-            SetBypassDocumentValidation(true).
-            SetOrdered(false).
-            SetUpsert(true)
-        
-        vertChan, err := StreamVerticesFromReader(file, workerCount)
-        if err != nil {
-            RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("%s", err)})
-            return
-        }
+	if request_type == "vertex" {
+		log.Infof("Loading vertex file: %s", handler.Filename)
+		vertInserter := db.NewUnorderedBufferedBulkInserter(vertexCol, bulkBufferSize).
+			SetBypassDocumentValidation(true).
+			SetOrdered(false).
+			SetUpsert(true)
+
+		vertChan, err := StreamVerticesFromReader(file, workerCount)
+		if err != nil {
+			RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("%s", err)})
+			return
+		}
 		dataChan := vertexSerialize(vertChan, workerCount)
-        count := 0
-        for d := range dataChan {
-            vertInserter.InsertRaw(d)
-            if count%logRate == 0 {
-                log.Infof("Loaded %d vertices", count)
-            }
-            count++
-        }
-        log.Infof("Loaded %d vertices", count)
+		count := 0
+		for d := range dataChan {
+			vertInserter.InsertRaw(d)
+			if count%logRate == 0 {
+				log.Infof("Loaded %d vertices", count)
+			}
+			count++
+		}
+		log.Infof("Loaded %d vertices", count)
 		vertInserter.Flush()
 	}
 	if request_type == "edge" {
-        log.Infof("Loading edge file: %s", handler.Filename)
-        edgeInserter := db.NewUnorderedBufferedBulkInserter(edgeCol, bulkBufferSize).
-            SetBypassDocumentValidation(true).
-            SetOrdered(false).
-            SetUpsert(true)
+		log.Infof("Loading edge file: %s", handler.Filename)
+		edgeInserter := db.NewUnorderedBufferedBulkInserter(edgeCol, bulkBufferSize).
+			SetBypassDocumentValidation(true).
+			SetOrdered(false).
+			SetUpsert(true)
 
-        edgeChan, err := StreamEdgesFromReader(file, workerCount)
+		edgeChan, err := StreamEdgesFromReader(file, workerCount)
 		if err != nil {
 			RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("%s", err)})
-            return
+			return
 		}
-        dataChan := edgeSerialize(edgeChan, fill_gid,  workerCount)
-        count := 0
-        for d := range dataChan {
-            edgeInserter.InsertRaw(d)
-            if count%logRate == 0 {
-                log.Infof("Loaded %d edges", count)
-            }
-            count++
-        }
-        log.Infof("Loaded %d vertices", count)
-        edgeInserter.Flush()
+		dataChan := edgeSerialize(edgeChan, fill_gid, workerCount)
+		count := 0
+		for d := range dataChan {
+			edgeInserter.InsertRaw(d)
+			if count%logRate == 0 {
+				log.Infof("Loaded %d edges", count)
+			}
+			count++
+		}
+		log.Infof("Loaded %d vertices", count)
+		edgeInserter.Flush()
 	}
 
-    responseData := map[string]string{"status" : "200", "message": "File uploaded successfully"}
-    responseJSON, err := json.Marshal(responseData)
-    if err != nil {
-        RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("%s", err)})
-        return
-    }
+	responseData := map[string]string{"status": "200", "message": "File uploaded successfully"}
+	responseJSON, err := json.Marshal(responseData)
+	if err != nil {
+		RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("%s", err)})
+		return
+	}
 
-    writer.WriteHeader(http.StatusOK)
-    writer.Write(responseJSON)
+	writer.WriteHeader(http.StatusOK)
+	writer.Write(responseJSON)
 }
 
 func vertexSerialize(vertChan chan *gripql.Vertex, workers int) chan []byte {
@@ -408,7 +408,7 @@ func vertexSerialize(vertChan chan *gripql.Vertex, workers int) chan []byte {
 }
 
 func edgeSerialize(edgeChan chan *gripql.Edge, fill_gid string, workers int) chan []byte {
-	dataChan := make(chan []byte, workers) 
+	dataChan := make(chan []byte, workers)
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -433,7 +433,6 @@ func edgeSerialize(edgeChan chan *gripql.Edge, fill_gid string, workers int) cha
 	return dataChan
 }
 
-
 func (gh *Handler) BulkStream(c *gin.Context, writer http.ResponseWriter, request *http.Request, graph string) error {
 	err := request.ParseMultipartForm(1024 * 1024 * 1024) // 10 GB limit
 	if err != nil {
@@ -442,8 +441,8 @@ func (gh *Handler) BulkStream(c *gin.Context, writer http.ResponseWriter, reques
 		return err
 	}
 
-    request_type := request.MultipartForm.Value["type"][0]
-    fmt.Println("VALUE OF REQUEST TYPE: ", request_type)
+	request_type := request.MultipartForm.Value["type"][0]
+	fmt.Println("VALUE OF REQUEST TYPE: ", request_type)
 
 	// Get the file from the form data
 	file, handler, err := request.FormFile("file")
@@ -453,59 +452,52 @@ func (gh *Handler) BulkStream(c *gin.Context, writer http.ResponseWriter, reques
 	}
 
 	defer file.Close()
-    fmt.Println("FILE RECIEVED: ", handler.Filename, "REQUEST TYPE: ", request_type )
-    var logRate = 10000
+	fmt.Println("FILE RECIEVED: ", handler.Filename, "REQUEST TYPE: ", request_type)
+	var logRate = 10000
 
-    elemChan := make(chan *gripql.GraphElement)
-    wait := make(chan bool)
+	if request_type == "vertex" {
+		VertChan, err := StreamVerticesFromReader(file, 5)
+		if err != nil {
+			return err
+		}
+		count := 0
+		elemChan := make(chan *gripql.GraphElement)
+		go func() {
+			if err := gh.client.BulkAdd(elemChan); err != nil {
+				log.Errorf("bulk add error: %v", err)
+			}
+		}()
+		for v := range VertChan {
+			count++
+			if count%logRate == 0 {
+				log.Infof("Loaded %d vertices", count)
+			}
+			elemChan <- &gripql.GraphElement{Graph: graph, Vertex: v}
+		}
+		close(elemChan)
+		log.Infof("Loaded total of %d vertices", count)
+	}
 
-    go func() {
-        if err := gh.client.BulkAdd(elemChan); err != nil {
-            log.Errorf("bulk add error: %v", err)
-        }
-        wait <- false
-    }()
+	/*
+	   if request_type == "edge" {
+	       EdgeChan, err := StreamEdgesFromReader(file, 5)
+	       if err != nil{
+	           return err
+	       }
+	       count := 0
+	       for e := range EdgeChan {
+	           count++
+	           if count % logRate == 0 {
+	               log.Infof("Loaded %d vertices", count)
+	           }
+	           elemChan <- &gripql.GraphElement{Graph: graph, Edge: e}
+	       }
+	       log.Infof("Loaded total of %d edges", count)
+	   }*/
 
-    
-    if request_type == "vertex" {
-        VertChan, err := StreamVerticesFromReader(file, 5)
-        if err != nil{
-            return err
-        }
-        count := 0
-
-        for v := range VertChan {
-            count++
-            if count%logRate == 0 {
-                log.Infof("Loaded %d vertices", count)
-            }
-            elemChan <- &gripql.GraphElement{Graph: graph, Vertex: v}
-        }
-        log.Infof("Loaded total of %d vertices", count)
-    }
-
-    //close(elemChan)
 	//<-wait
-    /*
-    if request_type == "edge" {
-        EdgeChan, err := StreamEdgesFromReader(file, 5)
-        if err != nil{
-            return err
-        }
-        count := 0
-        for e := range EdgeChan {
-            count++
-            if count % logRate == 0 {
-                log.Infof("Loaded %d vertices", count)
-            }
-            elemChan <- &gripql.GraphElement{Graph: graph, Edge: e}
-        }
-        log.Infof("Loaded total of %d edges", count)
-    }*/
 
-    //<-wait
-
-    responseData := map[string]string{"status" : "200", "message": "File uploaded successfully"}
+	responseData := map[string]string{"status": "200", "message": "File uploaded successfully"}
 	responseJSON, err := json.Marshal(responseData)
 	if err != nil {
 		http.Error(writer, "Error encoding JSON response", http.StatusInternalServerError)
@@ -513,9 +505,6 @@ func (gh *Handler) BulkStream(c *gin.Context, writer http.ResponseWriter, reques
 	}
 	writer.WriteHeader(http.StatusOK)
 	writer.Write(responseJSON)
-
-    close(elemChan)
-    <-wait
 	return nil
 
 }
@@ -545,7 +534,7 @@ func StreamEdgesFromReader(reader io.Reader, workers int) (chan *gripql.Edge, er
 				err := jum.Unmarshal([]byte(line), e)
 				if err != nil {
 					log.WithFields(log.Fields{"error": err}).Errorf("Unmarshaling edge: %s", line)
-                
+
 				} else {
 					edgeChan <- e
 				}
@@ -602,7 +591,6 @@ func StreamVerticesFromReader(reader io.Reader, workers int) (chan *gripql.Verte
 	return vertChan, nil
 }
 
-
 func processReader(reader io.Reader, chansize int) (<-chan string, error) {
 	scanner := bufio.NewScanner(reader)
 
@@ -613,13 +601,13 @@ func processReader(reader io.Reader, chansize int) (<-chan string, error) {
 	lineChan := make(chan string, chansize)
 
 	go func() {
-        for scanner.Scan() {
+		for scanner.Scan() {
 			line := scanner.Text()
 			lineChan <- line
 		}
 
 		if err := scanner.Err(); err != nil {
-            log.WithFields(log.Fields{"error reading from reader: ": err})
+			log.WithFields(log.Fields{"error reading from reader: ": err})
 		}
 		close(lineChan)
 	}()
