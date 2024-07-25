@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+    "strings"
 
 	"github.com/bmeg/grip-graphql/middleware"
 	"github.com/bmeg/grip/gdbi"
@@ -34,9 +35,82 @@ type Handler struct {
 	config map[string]string
 }
 
+func convertAnyToStringSlice(anySlice []any) ([]string, error) {
+	var stringSlice []string
+	for _, v := range anySlice {
+		str, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("element %v is not a string", v)
+		}
+		stringSlice = append(stringSlice, str)
+	}
+	return stringSlice, nil
+}
+
+func ParseAccess(c *gin.Context, resourceList []string, method string) error {
+    if len(resourceList) == 0{
+        return &middleware.ServerError{StatusCode: 401, Message: fmt.Sprintf("User is not allowed to %s on any graph", method)}
+    }
+    for _, v := range resourceList{
+        // currently checking if the project == the graph name, but could change it so that the graph name is of form program-project and then check the full resource path
+        project := strings.Split(v, "/projects/")
+        // list-graphs whitelisted method
+        if  project[1] == c.Param("graph") || c.Request.URL.Path == "list-graphs"{
+            return nil
+        }
+    }
+    return  &middleware.ServerError{StatusCode: 401, Message: fmt.Sprintf("User is not allowed to %s on graph: %s", method, c.Param("graph"))}
+}
+func TokenAuthMiddleware() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        //c.Next()
+        requestHeaders := c.Request.Header
+        if val, ok := requestHeaders["Authorization"]; ok {
+            Token := val[0]
+            var method string
+            if c.Request.Method == http.MethodGet {
+                method = "read"
+            }else if  c.Request.Method == http.MethodPost {
+                method = "create"
+            } else{
+                RegError(c, c.Writer, c.Param("graph"),  &middleware.ServerError{StatusCode: 405, Message: fmt.Sprintf("Method %s not allowed", c.Request.Method)})
+                c.Abort()
+                return
+            }
+
+            anyList, err := middleware.HandleJWTToken(Token, method)
+            if err != nil{
+                RegError(c, c.Writer, c.Param("graph"), err)
+                c.Abort()
+                return
+            }
+
+            resourceList, convErr := convertAnyToStringSlice(anyList)
+            if convErr != nil{
+                RegError(c, c.Writer, c.Param("graph"), convErr)
+                c.Abort()
+                return 
+            }
+            fmt.Println("RESOURCE LIST: ", resourceList)
+
+            err = ParseAccess(c, resourceList, method)
+            if  err != nil{
+                RegError(c, c.Writer, c.Param("graph"), err)
+                c.Abort()
+                return
+            }
+        }else {
+            RegError(c, c.Writer, c.Param("graph"),  &middleware.ServerError{StatusCode: 400, Message: "Authorization token not provided"})
+            c.Abort()
+            return
+        }
+        c.Next()
+    }
+}
 func NewHTTPHandler(client gripql.Client, config map[string]string) (http.Handler, error) {
 	r := gin.New()
 	r.Use(gin.Logger())
+    r.Use(TokenAuthMiddleware())
 	r.Use(gin.Recovery())
 
 	// Was getting 404s before adding this. Not 100% sure why
@@ -89,10 +163,11 @@ func NewHTTPHandler(client gripql.Client, config map[string]string) (http.Handle
 	})
 
 	r.GET("list-graphs", func(c *gin.Context) {
-		fmt.Printf("RAW PATH: %#v\n", c.Request.URL.RawPath)
-		fmt.Printf("PATH: %#v\n", c.Request.URL.Path)
-		h.ListGraphs(c, c.Writer)
-	})
+		//fmt.Printf("RAW PATH: %#v\n", c.Request.URL.RawPath)
+		//fmt.Printf("PATH: %#v\n", c.Request.URL.Path)
+        h.ListGraphs(c, c.Writer)
+    })
+
 
 	return h, nil
 }
@@ -110,7 +185,7 @@ func RegError(c *gin.Context, writer http.ResponseWriter, graph string, err erro
 			"message": ae.Message,
 			"data":    nil,
 		})
-		http.Error(writer, fmt.Sprintln("[", ae.StatusCode, "] graph: ", graph, "error: ", ae.Message), ae.StatusCode)
+        //http.Error(writer, fmt.Sprintln("[", ae.StatusCode, "] graph: ", graph, "error: ", ae.Message), ae.StatusCode)
 		return
 	}
 	c.JSON(http.StatusInternalServerError, gin.H{
@@ -118,7 +193,7 @@ func RegError(c *gin.Context, writer http.ResponseWriter, graph string, err erro
 		"message": "Internal Server Error",
 		"data":    nil,
 	})
-	http.Error(writer, fmt.Sprintln("[500]	graph", graph, "error:", err), http.StatusInternalServerError)
+	//http.Error(writer, fmt.Sprintln("[500]	graph", graph, "error:", err), http.StatusInternalServerError)
 }
 
 func (gh *Handler) ListLabels(c *gin.Context, writer http.ResponseWriter, request *http.Request, graph string) {
