@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -146,6 +147,9 @@ func NewHTTPHandler(client gripql.Client, config map[string]string) (http.Handle
 	r.POST(":graph/bulk-load", func(c *gin.Context) {
 		h.BulkStream(c, c.Writer, c.Request, c.Param("graph"))
 	})
+	r.POST(":graph/add-schema", func(c *gin.Context) {
+		h.AddSchema(c, c.Writer, c.Request, c.Param("graph"))
+	})
 	r.DELETE(":graph/del-graph", func(c *gin.Context) {
 		h.DeleteGraph(c, c.Writer, c.Request, c.Param("graph"))
 	})
@@ -218,6 +222,56 @@ func (gh *Handler) GetSchema(c *gin.Context, writer http.ResponseWriter, request
 		writer.WriteHeader(http.StatusOK)
 		fmt.Fprintln(writer, fmt.Sprintln("[200]  GET:", graph, " ", schema))
 	}
+}
+
+func (gh *Handler) AddSchema(c *gin.Context, writer http.ResponseWriter, request *http.Request, graph string) {
+    err := request.ParseMultipartForm(1024 * 1024 * 1024) // 10 GB limit
+    if err != nil {
+        RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: fmt.Sprintf("Error parsing form: %s", err)})
+        return
+    }
+    file, _, err := request.FormFile("file")
+    if err != nil {
+        RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: fmt.Sprintf("failed to parse attached file: %s", err)})
+        return
+    }
+    file.Close()
+
+	conn, err := gripql.Connect(rpc.ConfigWithDefaults("localhost:8202"), true)
+	if err != nil {
+        fmt.Println("HELLO 2.5", err)
+		RegError(c, writer, graph, err)
+		return
+	}
+
+	var graphs []*gripql.Graph
+
+
+    buf := bytes.NewBuffer(nil)
+    if _, err := io.Copy(buf, file); err != nil {
+        RegError(c, writer, graph, err)
+        return
+    }
+
+    graphs, err = gripql.ParseJSONGraphs(buf.Bytes())
+	if err != nil {
+        fmt.Println("HELLO 3:", err)
+		RegError(c, writer, graph, err)
+		return
+	}
+	for _, g := range graphs {
+		err := conn.AddSchema(g)
+		if err != nil {
+            fmt.Println("HELLO 4: ", err)
+			RegError(c, writer, graph, err)
+			return
+		}
+	}
+    c.JSON(200, gin.H{
+        "status":  200,
+        "message": "OK",
+        "data":    nil,
+    })
 }
 
 func (gh *Handler) GetGraph(c *gin.Context, writer http.ResponseWriter, request *http.Request, graph string) {
