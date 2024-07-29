@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
-    "strings"
 
 	"github.com/bmeg/grip-graphql/middleware"
 	"github.com/bmeg/grip/gdbi"
@@ -20,13 +20,13 @@ import (
 	"github.com/bmeg/grip/log"
 	"github.com/bmeg/grip/mongo"
 	"github.com/bmeg/grip/util"
+	"github.com/bmeg/grip/util/rpc"
 	"github.com/gin-gonic/gin"
 	"github.com/mongodb/mongo-tools/common/db"
 	"go.mongodb.org/mongo-driver/bson"
 	mgo "go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"google.golang.org/protobuf/encoding/protojson"
-    "github.com/bmeg/grip/util/rpc"
 )
 
 type Handler struct {
@@ -48,69 +48,75 @@ func convertAnyToStringSlice(anySlice []any) ([]string, error) {
 }
 
 func ParseAccess(c *gin.Context, resourceList []string, method string) error {
-    if len(resourceList) == 0{
-        return &middleware.ServerError{StatusCode: 401, Message: fmt.Sprintf("User is not allowed to %s on any graph", method)}
-    }
-    for _, v := range resourceList{
-        // currently checking if the project == the graph name, but could change it so that the graph name is of form program-project and then check the full resource path
-        project := strings.Split(v, "/projects/")
-        // list-graphs whitelisted method
-        if  project[1] == c.Param("graph") || c.Request.URL.Path == "list-graphs"{
-            return nil
-        }
-    }
-    return  &middleware.ServerError{StatusCode: 401, Message: fmt.Sprintf("User is not allowed to %s on graph: %s", method, c.Param("graph"))}
+	if len(resourceList) == 0 {
+		return &middleware.ServerError{StatusCode: 401, Message: fmt.Sprintf("User is not allowed to %s on any graph", method)}
+	}
+	for _, v := range resourceList {
+		// currently checking if the project == the graph name, but could change it so that the graph name is of form program-project and then check the full resource path
+		project := strings.Split(v, "/projects/")
+		// list-graphs whitelisted method
+		if project[1] == c.Param("graph") || c.Request.URL.Path == "list-graphs" {
+			return nil
+		}
+	}
+	return &middleware.ServerError{StatusCode: 401, Message: fmt.Sprintf("User is not allowed to %s on graph: %s", method, c.Param("graph"))}
 }
 func TokenAuthMiddleware() gin.HandlerFunc {
-    return func(c *gin.Context) {
-        //c.Next()
-        requestHeaders := c.Request.Header
-        if val, ok := requestHeaders["Authorization"]; ok {
-            Token := val[0]
-            var method string
-            if c.Request.Method == http.MethodGet {
-                method = "read"
-            }else if  c.Request.Method == http.MethodPost {
-                method = "create"
-            } else{
-                RegError(c, c.Writer, c.Param("graph"),  &middleware.ServerError{StatusCode: 405, Message: fmt.Sprintf("Method %s not allowed", c.Request.Method)})
-                c.Abort()
-                return
-            }
+	return func(c *gin.Context) {
+		//c.Next()
+		requestHeaders := c.Request.Header
+		if val, ok := requestHeaders["Authorization"]; ok {
+			Token := val[0]
+			var method string
+			if c.Request.Method == http.MethodGet {
+				method = "read"
+			} else if c.Request.Method == http.MethodPost {
+				method = "create"
+			} else {
+				RegError(c, c.Writer, c.Param("graph"), &middleware.ServerError{StatusCode: 405, Message: fmt.Sprintf("Method %s not allowed", c.Request.Method)})
+				c.Abort()
+				return
+			}
 
-            anyList, err := middleware.HandleJWTToken(Token, method)
-            if err != nil{
-                RegError(c, c.Writer, c.Param("graph"), err)
-                c.Abort()
-                return
-            }
+			anyList, err := middleware.HandleJWTToken(Token, method)
+			if err != nil {
+				RegError(c, c.Writer, c.Param("graph"), err)
+				c.Abort()
+				return
+			}
 
-            resourceList, convErr := convertAnyToStringSlice(anyList)
-            if convErr != nil{
-                RegError(c, c.Writer, c.Param("graph"), convErr)
-                c.Abort()
-                return 
-            }
-            fmt.Println("RESOURCE LIST: ", resourceList)
-
-            err = ParseAccess(c, resourceList, method)
-            if  err != nil{
-                RegError(c, c.Writer, c.Param("graph"), err)
-                c.Abort()
-                return
-            }
-        }else {
-            RegError(c, c.Writer, c.Param("graph"),  &middleware.ServerError{StatusCode: 400, Message: "Authorization token not provided"})
-            c.Abort()
-            return
-        }
-        c.Next()
-    }
+			resourceList, convErr := convertAnyToStringSlice(anyList)
+			if convErr != nil {
+				RegError(c, c.Writer, c.Param("graph"), convErr)
+				c.Abort()
+				return
+			}
+			fmt.Println("RESOURCE LIST: ", resourceList)
+			/* This is probably a bit too strict since there might only be 1 graph we're writing to.
+			   Instead, having create method access on at least one project is good enough permissions
+			   err = ParseAccess(c, resourceList, method)
+			   if  err != nil{
+			       RegError(c, c.Writer, c.Param("graph"), err)
+			       c.Abort()
+			       return
+			       }*/
+			if len(resourceList) == 0 {
+				RegError(c, c.Writer, c.Param("graph"), &middleware.ServerError{StatusCode: 400, Message: fmt.Sprintf("User does not have access to at least one project for method %", method)})
+				c.Abort()
+				return
+			}
+		} else {
+			RegError(c, c.Writer, c.Param("graph"), &middleware.ServerError{StatusCode: 400, Message: "Authorization token not provided"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }
 func NewHTTPHandler(client gripql.Client, config map[string]string) (http.Handler, error) {
 	r := gin.New()
 	r.Use(gin.Logger())
-    r.Use(TokenAuthMiddleware())
+	r.Use(TokenAuthMiddleware())
 	r.Use(gin.Recovery())
 
 	// Was getting 404s before adding this. Not 100% sure why
@@ -165,9 +171,8 @@ func NewHTTPHandler(client gripql.Client, config map[string]string) (http.Handle
 	r.GET("list-graphs", func(c *gin.Context) {
 		//fmt.Printf("RAW PATH: %#v\n", c.Request.URL.RawPath)
 		//fmt.Printf("PATH: %#v\n", c.Request.URL.Path)
-        h.ListGraphs(c, c.Writer)
-    })
-
+		h.ListGraphs(c, c.Writer)
+	})
 
 	return h, nil
 }
@@ -185,7 +190,7 @@ func RegError(c *gin.Context, writer http.ResponseWriter, graph string, err erro
 			"message": ae.Message,
 			"data":    nil,
 		})
-        //http.Error(writer, fmt.Sprintln("[", ae.StatusCode, "] graph: ", graph, "error: ", ae.Message), ae.StatusCode)
+		//http.Error(writer, fmt.Sprintln("[", ae.StatusCode, "] graph: ", graph, "error: ", ae.Message), ae.StatusCode)
 		return
 	}
 	c.JSON(http.StatusInternalServerError, gin.H{
@@ -510,45 +515,45 @@ func edgeSerialize(edgeChan chan *gripql.Edge, fill_gid string, workers int) cha
 }
 
 func (gh *Handler) BulkStream(c *gin.Context, writer http.ResponseWriter, request *http.Request, graph string) {
-    host := "localhost:8202"
-    var logRate = 10000
+	host := "localhost:8202"
+	var logRate = 10000
 
 	err := request.ParseMultipartForm(1024 * 1024 * 1024) // 10 GB limit
 	if err != nil {
-        RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: fmt.Sprintf("Error parsing form: %s", err)})
+		RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: fmt.Sprintf("Error parsing form: %s", err)})
 		return
 	}
 
-    types, ok := request.MultipartForm.Value["types"]
-    if ! ok || len(types) ==0 {
-        RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: fmt.Sprintf("types field not found in form: %s", err)})
-        return
-    }
-    request_type := types[0]
+	types, ok := request.MultipartForm.Value["types"]
+	if !ok || len(types) == 0 {
+		RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: fmt.Sprintf("types field not found in form: %s", err)})
+		return
+	}
+	request_type := types[0]
 
 	// Get the file from the form data
 	file, handler, err := request.FormFile("file")
 	if err != nil {
-        RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: fmt.Sprintf("failed to parse attached file: %s", err)})
+		RegError(c, writer, graph, &middleware.ServerError{StatusCode: 400, Message: fmt.Sprintf("failed to parse attached file: %s", err)})
 		return
 	}
 	defer file.Close()
 
-    conn, err := gripql.Connect(rpc.ConfigWithDefaults(host), true)
-    elemChan := make(chan *gripql.GraphElement)
-    wait := make(chan bool)
-    go func() {
-			if err := conn.BulkAdd(elemChan); err != nil {
-				log.Errorf("bulk add error: %v", err)
-			}
-			wait <- false
+	conn, err := gripql.Connect(rpc.ConfigWithDefaults(host), true)
+	elemChan := make(chan *gripql.GraphElement)
+	wait := make(chan bool)
+	go func() {
+		if err := conn.BulkAdd(elemChan); err != nil {
+			log.Errorf("bulk add error: %v", err)
+		}
+		wait <- false
 	}()
 
 	if request_type == "vertex" {
-        log.Infof("Loading vertex file: %s", handler.Filename)
+		log.Infof("Loading vertex file: %s", handler.Filename)
 		VertChan, err := StreamVerticesFromReader(file, 5)
 		if err != nil {
-            RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("%s", err)})
+			RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("%s", err)})
 			return
 		}
 		count := 0
@@ -562,30 +567,30 @@ func (gh *Handler) BulkStream(c *gin.Context, writer http.ResponseWriter, reques
 		log.Infof("Loaded total of %d vertices", count)
 	}
 	if request_type == "edge" {
-        log.Infof("Loading edge file: %s", handler.Filename)
-	    EdgeChan, err := StreamEdgesFromReader(file, 5)
-	    if err != nil{
-           RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("%s", err)})
-	       return
-	    }
-	    count := 0
-	    for e := range EdgeChan {
-	        count++
-	        if count % logRate == 0 {
-	            log.Infof("Loaded %d vertices", count)
-	        }
-	        elemChan <- &gripql.GraphElement{Graph: graph, Edge: e}
-	    }
-	    log.Infof("Loaded total of %d edges", count)
+		log.Infof("Loading edge file: %s", handler.Filename)
+		EdgeChan, err := StreamEdgesFromReader(file, 5)
+		if err != nil {
+			RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("%s", err)})
+			return
+		}
+		count := 0
+		for e := range EdgeChan {
+			count++
+			if count%logRate == 0 {
+				log.Infof("Loaded %d vertices", count)
+			}
+			elemChan <- &gripql.GraphElement{Graph: graph, Edge: e}
+		}
+		log.Infof("Loaded total of %d edges", count)
 	}
 
-    close(elemChan)
+	close(elemChan)
 	<-wait
 
 	responseData := map[string]string{"status": "200", "message": "File uploaded successfully"}
 	responseJSON, err := json.Marshal(responseData)
 	if err != nil {
-        RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("Error encoding JSON response %s", err)})
+		RegError(c, writer, graph, &middleware.ServerError{StatusCode: 500, Message: fmt.Sprintf("Error encoding JSON response %s", err)})
 		return
 	}
 
